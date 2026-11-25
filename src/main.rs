@@ -38,12 +38,15 @@ fn main() {
     }
     // GUI-subsystem exe: borrow the parent console for CLI output.
     unsafe {
-        windows_sys::Win32::System::Console::AttachConsole(
-            windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
-        );
+        windows_sys::Win32::System::Console::AttachConsole(windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS);
     }
     let code = cli(&args);
     std::process::exit(code);
+}
+
+fn usage() -> razer::Result<()> {
+    println!("{USAGE}");
+    Ok(())
 }
 
 fn battery_type_name(m: &Mouse, cfg: &Config) -> razer::Result<String> {
@@ -70,7 +73,12 @@ fn cli(args: &[String]) -> i32 {
         for i in hid::enumerate(razer::VID_RAZER, None) {
             println!(
                 "{:04X}:{:04X} page={:04X} usage={:04X} feat={:3} {}",
-                i.vid, i.pid, i.usage_page, i.usage, i.feature_len, i.path_string()
+                i.vid,
+                i.pid,
+                i.usage_page,
+                i.usage,
+                i.feature_len,
+                i.path_string()
             );
         }
         return 0;
@@ -89,7 +97,12 @@ fn cli(args: &[String]) -> i32 {
             for id in ids.split(',').filter_map(|s| u8::from_str_radix(s.trim(), 16).ok()) {
                 if let Some(r) = m.raw(0x07, id, 0x50, &[]) {
                     let args: Vec<String> = r[8..40].iter().map(|b| format!("{b:02X}")).collect();
-                    println!("07/{id:02X} status={:02X} size={:02X}\n  {}", r[0], r[5], args.join(" "));
+                    println!(
+                        "07/{id:02X} status={:02X} size={:02X}\n  {}",
+                        r[0],
+                        r[5],
+                        args.join(" ")
+                    );
                 }
             }
             return 0;
@@ -112,7 +125,10 @@ fn cli(args: &[String]) -> i32 {
         }
         return 0;
     }
-    if !matches!(cmd, "info" | "dpi" | "stages" | "stage" | "poll" | "sleep" | "lowbat" | "battery") {
+    if !matches!(
+        cmd,
+        "info" | "dpi" | "stages" | "stage" | "poll" | "sleep" | "lowbat" | "battery"
+    ) {
         println!("{USAGE}");
         return if matches!(cmd, "help" | "-h" | "--help") { 0 } else { 2 };
     }
@@ -131,7 +147,11 @@ fn cli(args: &[String]) -> i32 {
             "info" => {
                 let (pct, raw) = m.battery_raw()?;
                 let mv = m.voltage_mv()?;
-                println!("battery:  {pct}% (raw {raw}/255) · ≈{}.{:02} V", mv / 1000, mv % 1000 / 10);
+                println!(
+                    "battery:  {pct}% (raw {raw}/255) · ≈{}.{:02} V",
+                    mv / 1000,
+                    mv % 1000 / 10
+                );
                 println!("type:     {}", battery_type_name(&m, &Config::load())?);
                 let (x, y) = m.dpi()?;
                 println!("dpi:      {x} x {y}");
@@ -143,7 +163,9 @@ fn cli(args: &[String]) -> i32 {
                 println!("lowbat:   {}", fmt_lowbat(m.low_battery_threshold()?));
             }
             "dpi" => {
-                let Some(v) = num(arg) else { return Ok(println!("{USAGE}")) };
+                let Some(v) = num(arg) else {
+                    return usage();
+                };
                 m.set_dpi(v, v)?;
                 let (x, _) = m.dpi()?;
                 println!("dpi: {x}");
@@ -161,15 +183,24 @@ fn cli(args: &[String]) -> i32 {
                 }
                 let cur = m.dpi_stages()?;
                 let active = (cur.active as usize).clamp(1, vals.len()) as u8;
-                let st = DpiStages { active, stages: vals.iter().map(|&v| (v, v)).collect() };
+                let st = DpiStages {
+                    active,
+                    stages: vals.iter().map(|&v| (v, v)).collect(),
+                };
                 m.set_dpi_stages(&st)?;
                 let (x, y) = st.stages[active as usize - 1];
                 m.set_dpi(x, y)?;
                 let s = m.dpi_stages()?;
-                println!("stages: {:?} (active {})", s.stages.iter().map(|v| v.0).collect::<Vec<_>>(), s.active);
+                println!(
+                    "stages: {:?} (active {})",
+                    s.stages.iter().map(|v| v.0).collect::<Vec<_>>(),
+                    s.active
+                );
             }
             "stage" => {
-                let Some(n) = num(arg) else { return Ok(println!("{USAGE}")) };
+                let Some(n) = num(arg) else {
+                    return usage();
+                };
                 let mut st = m.dpi_stages()?;
                 if n == 0 || n as usize > st.stages.len() {
                     eprintln!("stage must be 1-{}", st.stages.len());
@@ -182,7 +213,9 @@ fn cli(args: &[String]) -> i32 {
                 println!("stage {n}: {x} DPI");
             }
             "poll" => {
-                let Some(v) = num(arg) else { return Ok(println!("{USAGE}")) };
+                let Some(v) = num(arg) else {
+                    return usage();
+                };
                 m.set_poll_rate(v)?;
                 println!("poll: {} Hz", m.poll_rate()?);
             }
@@ -204,11 +237,13 @@ fn cli(args: &[String]) -> i32 {
                         m.set_low_battery_percent(cfg.liion_threshold())?;
                     }
                     Some(a) => {
-                        let Some(t) = BatteryType::parse(a) else { return Ok(println!("{USAGE}")) };
+                        let Some(t) = BatteryType::parse(a) else {
+                            return usage();
+                        };
                         cfg.liion = false;
                         m.set_battery_type(t)?;
                     }
-                    None => return Ok(println!("{USAGE}")),
+                    None => return usage(),
                 }
                 cfg.save();
                 println!("battery type: {}", battery_type_name(&m, &cfg)?);
@@ -216,7 +251,9 @@ fn cli(args: &[String]) -> i32 {
                 println!("lowbat:       {}", fmt_lowbat(m.low_battery_threshold()?));
             }
             "sleep" => {
-                let Some(v) = num(arg) else { return Ok(println!("{USAGE}")) };
+                let Some(v) = num(arg) else {
+                    return usage();
+                };
                 m.set_idle_time(v)?;
                 println!("sleep: {} s", m.idle_time()?);
             }

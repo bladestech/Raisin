@@ -242,11 +242,12 @@ impl App {
     }
 
     fn nid(&self) -> NOTIFYICONDATAW {
-        let mut nid = NOTIFYICONDATAW::default();
-        nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
-        nid.hWnd = self.hwnd;
-        nid.uID = 1;
-        nid
+        NOTIFYICONDATAW {
+            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: self.hwnd,
+            uID: 1,
+            ..Default::default()
+        }
     }
 
     fn add_icon(&mut self) {
@@ -291,7 +292,11 @@ impl App {
                 TrayIcon::Logo => true,
                 TrayIcon::Alternate => self.logo_phase,
             };
-        if logo { self.logo_icon } else { self.icon }
+        if logo {
+            self.logo_icon
+        } else {
+            self.icon
+        }
     }
 
     fn push_icon(&self) {
@@ -417,11 +422,22 @@ impl App {
             let sub = CreatePopupMenu();
             if let Some(st) = &s.stages {
                 for (i, (x, _)) in st.stages.iter().enumerate() {
-                    AppendMenuW(sub, MF_STRING | dis, ID_STAGE + i, w(&format!("Stage {}: {x} DPI", i + 1)).as_ptr());
+                    AppendMenuW(
+                        sub,
+                        MF_STRING | dis,
+                        ID_STAGE + i,
+                        w(&format!("Stage {}: {x} DPI", i + 1)).as_ptr(),
+                    );
                 }
                 if st.active >= 1 && (st.active as usize) <= st.stages.len() {
                     let last = ID_STAGE + st.stages.len() - 1;
-                    CheckMenuRadioItem(sub, ID_STAGE as u32, last as u32, (ID_STAGE + st.active as usize - 1) as u32, MF_BYCOMMAND);
+                    CheckMenuRadioItem(
+                        sub,
+                        ID_STAGE as u32,
+                        last as u32,
+                        (ID_STAGE + st.active as usize - 1) as u32,
+                        MF_BYCOMMAND,
+                    );
                 }
             }
             AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("DPI stage").as_ptr());
@@ -432,17 +448,34 @@ impl App {
                 AppendMenuW(sub, MF_STRING | dis, ID_POLL + i, w(&format!("{hz} Hz")).as_ptr());
             }
             if let Some(i) = s.poll.and_then(|p| razer::POLL_RATES.iter().position(|&r| r == p)) {
-                CheckMenuRadioItem(sub, ID_POLL as u32, (ID_POLL + razer::POLL_RATES.len() - 1) as u32, (ID_POLL + i) as u32, MF_BYCOMMAND);
+                CheckMenuRadioItem(
+                    sub,
+                    ID_POLL as u32,
+                    (ID_POLL + razer::POLL_RATES.len() - 1) as u32,
+                    (ID_POLL + i) as u32,
+                    MF_BYCOMMAND,
+                );
             }
             AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("Polling rate").as_ptr());
 
             // Sleep timer
             let sub = CreatePopupMenu();
             for (i, secs) in IDLE_CHOICES.iter().enumerate() {
-                AppendMenuW(sub, MF_STRING | dis, ID_IDLE + i, w(&format!("{} min", secs / 60)).as_ptr());
+                AppendMenuW(
+                    sub,
+                    MF_STRING | dis,
+                    ID_IDLE + i,
+                    w(&format!("{} min", secs / 60)).as_ptr(),
+                );
             }
             if let Some(i) = s.idle.and_then(|v| IDLE_CHOICES.iter().position(|&c| c == v)) {
-                CheckMenuRadioItem(sub, ID_IDLE as u32, (ID_IDLE + IDLE_CHOICES.len() - 1) as u32, (ID_IDLE + i) as u32, MF_BYCOMMAND);
+                CheckMenuRadioItem(
+                    sub,
+                    ID_IDLE as u32,
+                    (ID_IDLE + IDLE_CHOICES.len() - 1) as u32,
+                    (ID_IDLE + i) as u32,
+                    MF_BYCOMMAND,
+                );
             }
             AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("Sleep after").as_ptr());
 
@@ -455,12 +488,23 @@ impl App {
             AppendMenuW(sub, MF_STRING | dis, ID_LIION, w("Li-ion 1.5 V rechargeable").as_ptr());
             let liion_active = self.battery_choice() == Some(3);
             if let Some(i) = self.battery_choice() {
-                CheckMenuRadioItem(sub, ID_BATTYPE as u32, ID_LIION as u32, (ID_BATTYPE + i) as u32, MF_BYCOMMAND);
+                CheckMenuRadioItem(
+                    sub,
+                    ID_BATTYPE as u32,
+                    ID_LIION as u32,
+                    (ID_BATTYPE + i) as u32,
+                    MF_BYCOMMAND,
+                );
             }
             AppendMenuW(sub, MF_SEPARATOR, 0, null());
             let step_flags = if !liion_active || !usable { MF_GRAYED } else { 0 }
                 | if self.config.liion_step { MF_CHECKED } else { 0 };
-            AppendMenuW(sub, MF_STRING | step_flags, ID_LIION_STEP, w("Li-ion cells drop voltage when low").as_ptr());
+            AppendMenuW(
+                sub,
+                MF_STRING | step_flags,
+                ID_LIION_STEP,
+                w("Li-ion cells drop voltage when low").as_ptr(),
+            );
             AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("Battery type").as_ptr());
 
             // Low-battery blink threshold
@@ -481,7 +525,13 @@ impl App {
                 AppendMenuW(sub, MF_STRING, ID_TRAYICON + i, w(t.label()).as_ptr());
             }
             if let Some(i) = TrayIcon::ALL.iter().position(|&t| t == self.config.tray_icon) {
-                CheckMenuRadioItem(sub, ID_TRAYICON as u32, (ID_TRAYICON + 2) as u32, (ID_TRAYICON + i) as u32, MF_BYCOMMAND);
+                CheckMenuRadioItem(
+                    sub,
+                    ID_TRAYICON as u32,
+                    (ID_TRAYICON + 2) as u32,
+                    (ID_TRAYICON + i) as u32,
+                    MF_BYCOMMAND,
+                );
             }
             AppendMenuW(menu, MF_POPUP, sub as usize, w("Tray icon").as_ptr());
             let auto = if autostart_enabled() { MF_CHECKED } else { 0 };
@@ -560,7 +610,9 @@ impl App {
     }
 
     fn select_stage(&mut self, i: usize) -> razer::Result<()> {
-        let Some(mut st) = self.state.stages.clone() else { return Ok(()) };
+        let Some(mut st) = self.state.stages.clone() else {
+            return Ok(());
+        };
         if i >= st.stages.len() {
             return Ok(());
         }
@@ -626,7 +678,6 @@ impl App {
             .map(|(i, _)| i)
     }
 
-
     fn error_balloon(&self, e: &Error) {
         if self.headless {
             return; // the settings window shows the mouse's state instead
@@ -656,7 +707,10 @@ impl App {
         let old_active = self.state.stages.as_ref().map_or(1, |s| s.active);
         // Keep the same active stage number if it still exists.
         let active = (old_active as usize).clamp(1, values.len()) as u8;
-        let st = DpiStages { active, stages: values.iter().map(|&v| (v, v)).collect() };
+        let st = DpiStages {
+            active,
+            stages: values.iter().map(|&v| (v, v)).collect(),
+        };
         let target = st.stages[active as usize - 1];
         self.act(|a| {
             let m = a.need_mouse()?;
@@ -702,7 +756,14 @@ fn set_autostart(on: bool) {
             v.extend(exe_path());
             v.extend("\"".encode_utf16());
             v.push(0);
-            RegSetValueExW(key, w("Raisin").as_ptr(), 0, REG_SZ, v.as_ptr() as *const u8, (v.len() * 2) as u32);
+            RegSetValueExW(
+                key,
+                w("Raisin").as_ptr(),
+                0,
+                REG_SZ,
+                v.as_ptr() as *const u8,
+                (v.len() * 2) as u32,
+            );
         } else {
             RegDeleteValueW(key, w("Raisin").as_ptr());
         }
@@ -797,7 +858,13 @@ fn make_battery_icon(level: Option<u8>, active: bool) -> HICON {
         ReleaseDC(null_mut(), hdc);
         std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u32, pixels.len());
         let mask = CreateBitmap(size, size, 1, 1, null());
-        let ii = ICONINFO { fIcon: 1, xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
+        let ii = ICONINFO {
+            fIcon: 1,
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: mask,
+            hbmColor: color,
+        };
         let icon = CreateIconIndirect(&ii);
         DeleteObject(color);
         DeleteObject(mask);
@@ -819,7 +886,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 }
                 WM_MOUSEMOVE => {
                     with_app(|a| {
-                        if a.last_refresh.map_or(true, |t| t.elapsed() > HOVER_REFRESH) {
+                        if a.last_refresh.is_none_or(|t| t.elapsed() > HOVER_REFRESH) {
                             a.refresh(false);
                         }
                     });
@@ -891,10 +958,30 @@ pub fn run() {
             ..zeroed()
         };
         RegisterClassW(&wc);
-        let hwnd = CreateWindowExW(0, class.as_ptr(), class.as_ptr(), 0, 0, 0, 0, 0, HWND_MESSAGE, null_mut(), hinst, null());
+        let hwnd = CreateWindowExW(
+            0,
+            class.as_ptr(),
+            class.as_ptr(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            HWND_MESSAGE,
+            null_mut(),
+            hinst,
+            null(),
+        );
         let taskbar_created = RegisterWindowMessageW(w("TaskbarCreated").as_ptr());
         let px = GetSystemMetrics(SM_CXSMICON);
-        let logo_icon = LoadImageW(hinst, 1 as windows_sys::core::PCWSTR, IMAGE_ICON, px, px, LR_DEFAULTCOLOR) as HICON;
+        let logo_icon = LoadImageW(
+            hinst,
+            1 as windows_sys::core::PCWSTR,
+            IMAGE_ICON,
+            px,
+            px,
+            LR_DEFAULTCOLOR,
+        ) as HICON;
 
         APP.with(|a| {
             *a.borrow_mut() = Some(App {
