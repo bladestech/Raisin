@@ -19,6 +19,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::config::{self, Config, TrayIcon};
 use crate::devices::Device;
+use crate::power::{self, Mode};
 use crate::razer::{self, BatteryType, DpiStages, Error, Mouse};
 
 const WM_TRAY: u32 = WM_APP + 1;
@@ -45,6 +46,7 @@ const ID_TRAYICON: usize = 700; // 700..703
 const ID_FREESPIN: usize = 800;
 const ID_SCROLL_ACCEL: usize = 801;
 const ID_SMART_REEL: usize = 802;
+const ID_POWER: usize = 900; // 900..903
 /// A drop this large between two readings = Li-ion low-voltage signal.
 const STEP_DROP: u8 = 30;
 const ID_SETTINGS: usize = 400;
@@ -533,8 +535,21 @@ impl App {
                 AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("DPI stage").as_ptr());
             }
 
-            // Polling rate (this mouse's rates)
+            // Power mode (presets for polling rate + sleep timer)
             let rates = self.poll_rates();
+            if s.poll.is_some() && !rates.is_empty() {
+                let sub = CreatePopupMenu();
+                for (i, m) in Mode::ALL.iter().enumerate() {
+                    AppendMenuW(sub, MF_STRING | dis, ID_POWER + i, w(m.label()).as_ptr());
+                }
+                if let Some(i) = self.power_mode().and_then(|p| Mode::ALL.iter().position(|&m| m == p)) {
+                    let last = ID_POWER + Mode::ALL.len() - 1;
+                    CheckMenuRadioItem(sub, ID_POWER as u32, last as u32, (ID_POWER + i) as u32, MF_BYCOMMAND);
+                }
+                AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("Power mode").as_ptr());
+            }
+
+            // Polling rate (this mouse's rates)
             if s.poll.is_some() && !rates.is_empty() {
                 let sub = CreatePopupMenu();
                 for (i, hz) in rates.iter().enumerate() {
@@ -693,6 +708,9 @@ impl App {
                 let hz = self.poll_rates()[c - ID_POLL];
                 self.act(|a| a.set_poll(hz))
             }
+            c if (ID_POWER..ID_POWER + Mode::ALL.len()).contains(&c) => {
+                self.act(|a| a.set_power(Mode::ALL[c - ID_POWER]))
+            }
             ID_FREESPIN => {
                 let on = self.state.free_spin != Some(true);
                 self.act(|a| a.need_mouse()?.set_free_spin(on))
@@ -769,6 +787,29 @@ impl App {
 
     fn set_idle(&mut self, secs: u16) -> razer::Result<()> {
         self.need_mouse()?.set_idle_time(secs)
+    }
+
+    /// Apply a power mode: polling rate, then the sleep timer if the mouse
+    /// has one.
+    fn set_power(&mut self, mode: Mode) -> razer::Result<()> {
+        self.config.power = Some(mode);
+        self.config.save();
+        let rates = self.poll_rates();
+        let has_idle = self.state.idle.is_some();
+        let m = self.need_mouse()?;
+        if let Some(hz) = mode.poll(rates) {
+            m.set_poll_rate(hz)?;
+        }
+        if has_idle {
+            m.set_idle_time(mode.idle())?;
+        }
+        Ok(())
+    }
+
+    /// The power mode the current settings match, if any.
+    fn power_mode(&self) -> Option<Mode> {
+        let poll = self.state.poll?;
+        power::current(self.poll_rates(), poll, self.state.idle, self.config.power)
     }
 
     fn set_lowbat(&mut self, pct: u8) -> razer::Result<()> {

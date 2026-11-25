@@ -4,6 +4,11 @@ All notable changes to Raisin are listed here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+
+- Power modes next to polling rate and sleep timer: Power Saver (lowest polling rate, 1-minute sleep), Balanced (1000 Hz, 5 minutes) and Max (the mouse's fastest rate, 5 minutes). In the settings window, the tray menu and `raisin power`; `raisin info` shows the current mode.
+- Info bubbles: hover the (i) next to a setting in the settings window to see what it does.
+
 ## [0.1.0] - 2026-11-25
 
 First release: a lightweight Razer Synapse replacement for Windows.

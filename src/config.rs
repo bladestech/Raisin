@@ -3,6 +3,8 @@
 
 use std::path::PathBuf;
 
+use crate::power::Mode;
+
 /// What the tray icon shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum TrayIcon {
@@ -40,6 +42,8 @@ pub struct Config {
     /// Cells drop their voltage on purpose when nearly empty.
     pub liion_step: bool,
     pub tray_icon: TrayIcon,
+    /// Power mode picked last; breaks ties where two modes set the same.
+    pub power: Option<Mode>,
 }
 
 /// Regulated Li-ion AAs sit near 1.5 V until they're nearly empty, then
@@ -84,6 +88,7 @@ impl Config {
                         c.tray_icon = t;
                     }
                 }
+                "power" => c.power = Mode::parse(v),
                 _ => {}
             }
         }
@@ -96,10 +101,11 @@ impl Config {
             let _ = std::fs::create_dir_all(dir);
         }
         let text = format!(
-            "liion={}\nliion_step={}\ntray_icon={}\n",
+            "liion={}\nliion_step={}\ntray_icon={}\npower={}\n",
             self.liion as u8,
             self.liion_step as u8,
-            self.tray_icon.key()
+            self.tray_icon.key(),
+            self.power.map_or("", Mode::key)
         );
         let _ = std::fs::write(p, text);
     }

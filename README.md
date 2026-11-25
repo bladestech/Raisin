@@ -39,6 +39,8 @@ Synapse is a large Electron app with several background services, and it typical
 - **Low-battery warning**: set where the mouse starts blinking red (5 to 30%), with a matching Windows notification.
 - **Scroll wheel** (Basilisk V3 family): free spin or tactile, scroll acceleration, Smart Reel.
 - **Sleep timer**: 1 to 15 minutes.
+- **Power modes**: one click for **Power Saver** (lowest polling rate, 1-minute sleep), **Balanced** (1000 Hz, 5 minutes) or **Max** (the fastest rate your mouse supports, 5 minutes).
+- **Info bubbles**: hover an (i) next to a setting to see what it does.
 - **Mouse details**: model, firmware version, USB ID, connection, and a one-click serial number copy for warranty claims.
 - **Tray icon**: battery gauge, logo, or alternating between them.
 - **Start with Windows**, and a **command line** for scripts and hotkeys.
@@ -82,6 +84,8 @@ raisin stages <a,b,...>     set 1-5 DPI stages (keeps the active stage)
 raisin stage <n>            switch to stage n
 raisin poll <hz>            polling rate (info lists what your mouse supports)
 raisin sleep <seconds>      sleep timer, 60-900
+raisin power <saver|balanced|max>
+                            power mode (polling rate + sleep timer)
 raisin lowbat <5-30>        red low-battery blink threshold, percent
 raisin battery <alkaline|nimh|lithium|liion|liion-step>
 raisin scroll <tactile|freespin>
