@@ -316,3 +316,42 @@ impl Mouse {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_layout_and_crc() {
+        let r = build(0x04, 0x05, 0x07, &[1, 2, 3]);
+        assert_eq!(r[1], TRANSACTION_ID);
+        assert_eq!((r[5], r[6], r[7]), (0x07, 0x04, 0x05));
+        assert_eq!(&r[8..11], &[1, 2, 3]);
+        // CRC is the XOR of bytes 2..=87.
+        assert_eq!(r[88], r[2..88].iter().fold(0, |a, b| a ^ b));
+    }
+
+    #[test]
+    fn low_battery_threshold_matches_openrazer() {
+        // OpenRazer documents 0x0C = 5%, 0x26 = 15%, 0x3F = 25%.
+        assert_eq!(percent_to_raw(5), 0x0C);
+        assert_eq!(percent_to_raw(15), 0x26);
+        assert_eq!(percent_to_raw(25), 0x3F);
+    }
+
+    #[test]
+    fn low_battery_choices_round_trip() {
+        for p in LOW_BATTERY_CHOICES {
+            assert_eq!(raw_to_percent(percent_to_raw(p)), p);
+        }
+    }
+
+    #[test]
+    fn battery_type_names_parse() {
+        for t in BatteryType::ALL {
+            let key = format!("{t:?}").to_ascii_lowercase();
+            assert_eq!(BatteryType::parse(&key), Some(t));
+        }
+        assert_eq!(BatteryType::parse("liion"), None); // a Raisin profile, not a mouse type
+    }
+}

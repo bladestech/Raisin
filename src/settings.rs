@@ -89,12 +89,19 @@ impl View {
             battery_choice: app.battery_choice(),
             liion_step: app.config.liion_step,
             lowbat: app.lowbat_index(),
-            stages: s.stages.as_ref().map(|st| st.stages.iter().map(|v| v.0).collect()).unwrap_or_default(),
+            stages: s
+                .stages
+                .as_ref()
+                .map(|st| st.stages.iter().map(|v| v.0).collect())
+                .unwrap_or_default(),
             active: s.stages.as_ref().map_or(0, |st| st.active as usize),
             poll: s.poll.and_then(|p| razer::POLL_RATES.iter().position(|&r| r == p)),
             idle: s.idle.and_then(|v| IDLE_CHOICES.iter().position(|&c| c == v)),
             autostart: autostart_enabled(),
-            tray_icon: TrayIcon::ALL.iter().position(|&t| t == app.config.tray_icon).unwrap_or(0),
+            tray_icon: TrayIcon::ALL
+                .iter()
+                .position(|&t| t == app.config.tray_icon)
+                .unwrap_or(0),
         }
     }
 
@@ -140,7 +147,12 @@ impl Rect {
         Rect::new(self.x + d, self.y + d, self.w - 2.0 * d, self.h - 2.0 * d)
     }
     fn d2d(&self) -> D2D_RECT_F {
-        D2D_RECT_F { left: self.x, top: self.y, right: self.x + self.w, bottom: self.y + self.h }
+        D2D_RECT_F {
+            left: self.x,
+            top: self.y,
+            right: self.x + self.w,
+            bottom: self.y + self.h,
+        }
     }
 }
 
@@ -151,7 +163,12 @@ struct C(f32, f32, f32, f32);
 
 impl C {
     fn d2d(self) -> D2D1_COLOR_F {
-        D2D1_COLOR_F { r: self.0, g: self.1, b: self.2, a: self.3 }
+        D2D1_COLOR_F {
+            r: self.0,
+            g: self.1,
+            b: self.2,
+            a: self.3,
+        }
     }
     fn alpha(self, a: f32) -> C {
         C(self.0, self.1, self.2, self.3 * a)
@@ -199,7 +216,10 @@ fn reg_dword(path: &str, name: &str) -> Option<u32> {
 }
 
 fn system_dark() -> bool {
-    reg_dword(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme") == Some(0)
+    reg_dword(
+        r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        "AppsUseLightTheme",
+    ) == Some(0)
 }
 
 fn system_accent() -> C {
@@ -278,12 +298,30 @@ struct Gfx {
     logo: Option<ID2D1Bitmap>,
 }
 
-fn text_format(dw: &IDWriteFactory, family: PCWSTR, size: f32, weight: DWRITE_FONT_WEIGHT, center: bool) -> windows::core::Result<IDWriteTextFormat> {
+fn text_format(
+    dw: &IDWriteFactory,
+    family: PCWSTR,
+    size: f32,
+    weight: DWRITE_FONT_WEIGHT,
+    center: bool,
+) -> windows::core::Result<IDWriteTextFormat> {
     unsafe {
-        let f = dw.CreateTextFormat(family, None, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, wstr!("en-us"))?;
+        let f = dw.CreateTextFormat(
+            family,
+            None,
+            weight,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            size,
+            wstr!("en-us"),
+        )?;
         f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
         f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-        f.SetTextAlignment(if center { DWRITE_TEXT_ALIGNMENT_CENTER } else { DWRITE_TEXT_ALIGNMENT_LEADING })?;
+        f.SetTextAlignment(if center {
+            DWRITE_TEXT_ALIGNMENT_CENTER
+        } else {
+            DWRITE_TEXT_ALIGNMENT_LEADING
+        })?;
         Ok(f)
     }
 }
@@ -329,7 +367,10 @@ impl Gfx {
             };
             let hprops = D2D1_HWND_RENDER_TARGET_PROPERTIES {
                 hwnd: WHWND(hwnd),
-                pixelSize: D2D_SIZE_U { width: rc.right as u32, height: rc.bottom as u32 },
+                pixelSize: D2D_SIZE_U {
+                    width: rc.right as u32,
+                    height: rc.bottom as u32,
+                },
                 presentOptions: D2D1_PRESENT_OPTIONS_NONE,
             };
             let rt = factory.CreateHwndRenderTarget(&props, &hprops)?;
@@ -350,7 +391,10 @@ impl Gfx {
             };
             let logo = rt
                 .CreateBitmap(
-                    D2D_SIZE_U { width: LOGO_PX, height: LOGO_PX },
+                    D2D_SIZE_U {
+                        width: LOGO_PX,
+                        height: LOGO_PX,
+                    },
                     Some(LOGO_BGRA.as_ptr() as *const _),
                     LOGO_PX * 4,
                     &D2D1_BITMAP_PROPERTIES {
@@ -373,7 +417,11 @@ impl Gfx {
 
     fn fill(&self, r: Rect, radius: f32, c: C) {
         self.color(c);
-        let rr = D2D1_ROUNDED_RECT { rect: r.d2d(), radiusX: radius, radiusY: radius };
+        let rr = D2D1_ROUNDED_RECT {
+            rect: r.d2d(),
+            radiusX: radius,
+            radiusY: radius,
+        };
         unsafe { self.rt.FillRoundedRectangle(&rr, &self.brush) };
     }
 
@@ -393,7 +441,14 @@ impl Gfx {
         self.color(c);
         let u: Vec<u16> = s.encode_utf16().collect();
         unsafe {
-            self.rt.DrawText(&u, f, &r.d2d(), &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            self.rt.DrawText(
+                &u,
+                f,
+                &r.d2d(),
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
         }
     }
 }
@@ -492,8 +547,14 @@ unsafe fn create() -> Option<HWND> {
         w(CLASS).as_ptr(),
         w("Raisin").as_ptr(),
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        x, y, ww, wh,
-        null_mut(), null_mut(), hinst, null(),
+        x,
+        y,
+        ww,
+        wh,
+        null_mut(),
+        null_mut(),
+        hinst,
+        null(),
     );
     if hwnd.is_null() {
         return None;
@@ -511,14 +572,27 @@ const STYLE: u32 = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
 
 fn outer_size(dpi: u32) -> (i32, i32) {
     let s = |v: f32| (v * dpi as f32 / 96.0).round() as i32;
-    let mut rc = RECT { left: 0, top: 0, right: s(WIDTH), bottom: s(HEIGHT) };
+    let mut rc = RECT {
+        left: 0,
+        top: 0,
+        right: s(WIDTH),
+        bottom: s(HEIGHT),
+    };
     unsafe { AdjustWindowRectExForDpi(&mut rc, STYLE, 0, 0, dpi) };
     (rc.right - rc.left, rc.bottom - rc.top)
 }
 
 unsafe fn fit_to_dpi(hwnd: HWND, dpi: u32) {
     let (ww, wh) = outer_size(dpi);
-    SetWindowPos(hwnd, null_mut(), 0, 0, ww, wh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(
+        hwnd,
+        null_mut(),
+        0,
+        0,
+        ww,
+        wh,
+        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+    );
 }
 
 /// Acrylic backdrop + dark title bar. Returns false if unsupported.
@@ -540,7 +614,12 @@ unsafe fn apply_backdrop(hwnd: HWND, dark: bool) -> bool {
     )
     .is_ok();
     if ok {
-        let m = MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 };
+        let m = MARGINS {
+            cxLeftWidth: -1,
+            cxRightWidth: -1,
+            cyTopHeight: -1,
+            cyBottomHeight: -1,
+        };
         let _ = DwmExtendFrameIntoClientArea(h, &m);
     }
     ok
@@ -575,7 +654,11 @@ fn step_size(v: u16) -> u16 {
 }
 
 fn bump(v: u16, up: bool) -> u16 {
-    let n = if up { v.saturating_add(step_size(v)) } else { v.saturating_sub(step_size(v.saturating_sub(1))) };
+    let n = if up {
+        v.saturating_add(step_size(v))
+    } else {
+        v.saturating_sub(step_size(v.saturating_sub(1)))
+    };
     n.clamp(razer::DPI_MIN, razer::DPI_MAX)
 }
 
@@ -593,7 +676,11 @@ impl Ui {
         let mut hits: Vec<(Rect, Hit)> = Vec::new();
         unsafe {
             g.rt.BeginDraw();
-            let bg = if self.acrylic { C(0.0, 0.0, 0.0, 0.0) } else { t.fallback_bg };
+            let bg = if self.acrylic {
+                C(0.0, 0.0, 0.0, 0.0)
+            } else {
+                t.fallback_bg
+            };
             g.rt.Clear(Some(&bg.d2d()));
         }
         self.draw(&g, &t, &mut hits);
@@ -615,7 +702,11 @@ impl Ui {
         let gy = 30.0;
         let body = Rect::new(gx, gy, 40.0, 22.0);
         g.stroke(body, 5.0, 1.5, if usable { t.text } else { t.text3 });
-        g.fill(Rect::new(gx + 40.5, gy + 7.0, 3.0, 8.0), 1.5, if usable { t.text } else { t.text3 });
+        g.fill(
+            Rect::new(gx + 40.5, gy + 7.0, 3.0, 8.0),
+            1.5,
+            if usable { t.text } else { t.text3 },
+        );
         if let (true, Some(b)) = (usable, v.battery) {
             let inner = body.inset(3.5);
             let w = (inner.w * b.min(100) as f32 / 100.0).max(3.0);
@@ -625,7 +716,10 @@ impl Ui {
         let (big, sub) = if v.loading {
             ("Raisin".to_string(), "Reading mouse…".to_string())
         } else if !v.connected {
-            ("Not connected".to_string(), "Plug in the HyperSpeed receiver".to_string())
+            (
+                "Not connected".to_string(),
+                "Plug in the HyperSpeed receiver".to_string(),
+            )
         } else if v.asleep {
             ("Asleep".to_string(), "Move the mouse to wake it".to_string())
         } else {
@@ -651,13 +745,33 @@ impl Ui {
         self.card(g, t, card);
         y += 14.0;
         self.label(g, t, "Battery type", y, usable);
-        self.segmented(g, t, hits, y, &BATTERY_LABELS, v.battery_choice, usable, Hit::BatType, hover);
+        self.segmented(
+            g,
+            t,
+            hits,
+            y,
+            &BATTERY_LABELS,
+            v.battery_choice,
+            usable,
+            Hit::BatType,
+            hover,
+        );
         y += ROW_H + 12.0;
         self.label(g, t, "Warn at", y, usable);
         self.segmented(g, t, hits, y, &LOWBAT_LABELS, v.lowbat, usable, Hit::Lowbat, hover);
         y += ROW_H + 12.0;
         let liion = v.battery_choice == Some(3);
-        self.toggle_row(g, t, hits, y, "Li-ion cells drop voltage when low", v.liion_step, usable && liion, Hit::Step, hover);
+        self.toggle_row(
+            g,
+            t,
+            hits,
+            y,
+            "Li-ion cells drop voltage when low",
+            v.liion_step,
+            usable && liion,
+            Hit::Step,
+            hover,
+        );
 
         // --- DPI card ---
         y = 246.0;
@@ -666,11 +780,20 @@ impl Ui {
         let cx = PAD + 16.0;
         let inner_w = CARD_W - 32.0;
         y += 14.0;
-        g.text("DPI stages", Rect::new(cx, y, 200.0, ROW_H), &g.fonts.body_bold, if usable { t.text } else { t.text3 });
+        g.text(
+            "DPI stages",
+            Rect::new(cx, y, 200.0, ROW_H),
+            &g.fonts.body_bold,
+            if usable { t.text } else { t.text3 },
+        );
         let dirty = self.pending.as_ref().is_some_and(|p| *p != v.stages);
         if dirty && usable {
             let apply = Rect::new(cx + inner_w - 76.0, y + 1.0, 76.0, 28.0);
-            let a = if hover == Some(Hit::Apply) { t.accent.mix(t.text, 0.12) } else { t.accent };
+            let a = if hover == Some(Hit::Apply) {
+                t.accent.mix(t.text, 0.12)
+            } else {
+                t.accent
+            };
             g.fill(apply, 6.0, a);
             g.text("Apply", apply, &g.fonts.center, t.on_accent);
             hits.push((apply, Hit::Apply));
@@ -710,9 +833,29 @@ impl Ui {
         // Not a mouse setting: always enabled.
         self.label(g, t, "Tray icon", y, true);
         let tray_labels = TrayIcon::ALL.map(|t| t.label());
-        self.segmented(g, t, hits, y, &tray_labels, Some(v.tray_icon), true, Hit::TrayIcon, hover);
+        self.segmented(
+            g,
+            t,
+            hits,
+            y,
+            &tray_labels,
+            Some(v.tray_icon),
+            true,
+            Hit::TrayIcon,
+            hover,
+        );
         y += ROW_H + 12.0;
-        self.toggle_row(g, t, hits, y, "Start Raisin with Windows", v.autostart, true, Hit::Autostart, hover);
+        self.toggle_row(
+            g,
+            t,
+            hits,
+            y,
+            "Start Raisin with Windows",
+            v.autostart,
+            true,
+            Hit::Autostart,
+            hover,
+        );
     }
 
     fn card(&self, g: &Gfx, t: &Theme, r: Rect) {
@@ -721,7 +864,12 @@ impl Ui {
     }
 
     fn label(&self, g: &Gfx, t: &Theme, s: &str, y: f32, enabled: bool) {
-        g.text(s, Rect::new(PAD + 16.0, y, 110.0, ROW_H), &g.fonts.body, if enabled { t.text } else { t.text3 });
+        g.text(
+            s,
+            Rect::new(PAD + 16.0, y, 110.0, ROW_H),
+            &g.fonts.body,
+            if enabled { t.text } else { t.text3 },
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -752,7 +900,11 @@ impl Ui {
                 if enabled && hover == Some(hit(i)) {
                     g.fill(s.inset(3.0), 4.0, t.ctrl_hover);
                 }
-                if enabled { t.text } else { t.text3 }
+                if enabled {
+                    t.text
+                } else {
+                    t.text3
+                }
             };
             g.text(l, s, &g.fonts.center, color);
             if enabled && !sel {
@@ -762,19 +914,39 @@ impl Ui {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn toggle_row(&self, g: &Gfx, t: &Theme, hits: &mut Vec<(Rect, Hit)>, y: f32, text: &str, on: bool, enabled: bool, hit: Hit, hover: Option<Hit>) {
+    fn toggle_row(
+        &self,
+        g: &Gfx,
+        t: &Theme,
+        hits: &mut Vec<(Rect, Hit)>,
+        y: f32,
+        text: &str,
+        on: bool,
+        enabled: bool,
+        hit: Hit,
+        hover: Option<Hit>,
+    ) {
         let row = Rect::new(PAD + 6.0, y, CARD_W - 12.0, ROW_H);
         if enabled && hover == Some(hit) {
             g.fill(row, 6.0, t.ctrl_hover);
         }
-        g.text(text, Rect::new(PAD + 16.0, y, 300.0, ROW_H), &g.fonts.body, if enabled { t.text } else { t.text3 });
+        g.text(
+            text,
+            Rect::new(PAD + 16.0, y, 300.0, ROW_H),
+            &g.fonts.body,
+            if enabled { t.text } else { t.text3 },
+        );
         let tr = Rect::new(PAD + CARD_W - 16.0 - 40.0, y + 5.0, 40.0, 20.0);
         if on {
             g.fill(tr, 10.0, if enabled { t.accent } else { t.text3 });
             g.fill(Rect::new(tr.x + 23.0, tr.y + 3.0, 14.0, 14.0), 7.0, t.on_accent);
         } else {
             g.stroke(tr, 10.0, 1.0, if enabled { t.text2 } else { t.text3 });
-            g.fill(Rect::new(tr.x + 5.0, tr.y + 5.0, 10.0, 10.0), 5.0, if enabled { t.text2 } else { t.text3 });
+            g.fill(
+                Rect::new(tr.x + 5.0, tr.y + 5.0, 10.0, 10.0),
+                5.0,
+                if enabled { t.text2 } else { t.text3 },
+            );
         }
         if enabled {
             hits.push((row, hit));
@@ -782,7 +954,18 @@ impl Ui {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn stage_row(&self, g: &Gfx, t: &Theme, hits: &mut Vec<(Rect, Hit)>, row: Rect, i: usize, value: u16, count: usize, usable: bool, hover: Option<Hit>) {
+    fn stage_row(
+        &self,
+        g: &Gfx,
+        t: &Theme,
+        hits: &mut Vec<(Rect, Hit)>,
+        row: Rect,
+        i: usize,
+        value: u16,
+        count: usize,
+        usable: bool,
+        hover: Option<Hit>,
+    ) {
         let v = &self.view;
         let active = v.active == i + 1;
         let row_hover = matches!(hover, Some(Hit::Stage(j) | Hit::Minus(j) | Hit::Plus(j) | Hit::Remove(j)) if j == i);
@@ -801,7 +984,12 @@ impl Ui {
             g.stroke(rc, 8.0, 1.0, if usable { t.text2 } else { t.text3 });
         }
         let fg = if usable { t.text } else { t.text3 };
-        g.text(&format!("Stage {}", i + 1), Rect::new(row.x + 40.0, row.y, 100.0, row.h), &g.fonts.body, fg);
+        g.text(
+            &format!("Stage {}", i + 1),
+            Rect::new(row.x + 40.0, row.y, 100.0, row.h),
+            &g.fonts.body,
+            fg,
+        );
 
         // Stepper: [-] value [+]  (x)
         let right = row.x + row.w - 10.0;
@@ -810,7 +998,11 @@ impl Ui {
         let val = Rect::new(plus.x - 76.0, row.y, 76.0, row.h);
         let minus = Rect::new(val.x - 28.0, row.y + 3.0, 28.0, 28.0);
         for (r, label, h) in [(minus, "\u{E738}", Hit::Minus(i)), (plus, "\u{E710}", Hit::Plus(i))] {
-            let c = if usable && hover == Some(h) { t.ctrl_hover.mix(t.ctrl, 0.3) } else { t.ctrl };
+            let c = if usable && hover == Some(h) {
+                t.ctrl_hover.mix(t.ctrl, 0.3)
+            } else {
+                t.ctrl
+            };
             g.fill(r, 6.0, c);
             g.stroke(r, 6.0, 1.0, t.ctrl_stroke);
             g.text(label, r, &g.fonts.glyph, fg);
@@ -879,9 +1071,8 @@ fn activate(hit: Hit) {
         Hit::Stage(i) => {
             // Unapplied edits would be lost by a stage switch; apply them first.
             let pending = with_ui(|u| u.pending.clone()).flatten();
-            match pending {
-                Some(p) => drop(with_app(|a| a.apply_stages(p))),
-                None => {}
+            if let Some(p) = pending {
+                with_app(|a| a.apply_stages(p));
             }
             with_app(|a| a.act(|a| a.select_stage(i)));
         }
@@ -897,7 +1088,10 @@ fn activate(hit: Hit) {
         Hit::AddStage => drop(with_ui(|u| {
             u.edit_stages(|s| {
                 if s.len() < 5 {
-                    let next = s.last().map_or(800, |&l| l.saturating_mul(2)).clamp(razer::DPI_MIN, razer::DPI_MAX);
+                    let next = s
+                        .last()
+                        .map_or(800, |&l| l.saturating_mul(2))
+                        .clamp(razer::DPI_MIN, razer::DPI_MAX);
                     s.push(next);
                 }
             })
@@ -949,7 +1143,15 @@ unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) ->
                     g.rt.SetDpi(dpi as f32, dpi as f32);
                 }
             });
-            SetWindowPos(hwnd, null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
             0
         }
         WM_SETTINGCHANGE | WM_DWMCOLORIZATIONCOLORCHANGED => {
@@ -1020,11 +1222,16 @@ unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) ->
         WM_MOUSEWHEEL => {
             // Scroll over a stage row to nudge its DPI.
             let delta = ((wp >> 16) & 0xFFFF) as i16;
-            let mut pt = POINT { x: (lp & 0xFFFF) as i16 as i32, y: ((lp >> 16) & 0xFFFF) as i16 as i32 };
+            let mut pt = POINT {
+                x: (lp & 0xFFFF) as i16 as i32,
+                y: ((lp >> 16) & 0xFFFF) as i16 as i32,
+            };
             ScreenToClient(hwnd, &mut pt);
             with_ui(|u| {
                 let s = 96.0 / u.dpi as f32;
-                if let Some(Hit::Stage(i) | Hit::Minus(i) | Hit::Plus(i) | Hit::Remove(i)) = u.hit_at(pt.x as f32 * s, pt.y as f32 * s) {
+                if let Some(Hit::Stage(i) | Hit::Minus(i) | Hit::Plus(i) | Hit::Remove(i)) =
+                    u.hit_at(pt.x as f32 * s, pt.y as f32 * s)
+                {
                     u.edit_stages(|st| st[i] = bump(st[i], delta > 0));
                 }
             });
@@ -1065,5 +1272,25 @@ unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) ->
             0
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dpi_stepper_is_symmetric_at_boundaries() {
+        assert_eq!(bump(950, true), 1000);
+        assert_eq!(bump(1000, false), 950);
+        assert_eq!(bump(1000, true), 1100);
+        assert_eq!(bump(5000, false), 4900);
+        assert_eq!(bump(5000, true), 5500);
+    }
+
+    #[test]
+    fn dpi_stepper_clamps() {
+        assert_eq!(bump(razer::DPI_MIN, false), razer::DPI_MIN);
+        assert_eq!(bump(razer::DPI_MAX, true), razer::DPI_MAX);
     }
 }

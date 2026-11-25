@@ -5,21 +5,17 @@ use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
 
+use windows_sys::core::GUID;
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
-    SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
-    SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
+    DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
 };
 use windows_sys::Win32::Devices::HumanInterfaceDevice::{
-    HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetFeature, HidD_GetHidGuid,
-    HidD_GetPreparsedData, HidD_SetFeature, HidP_GetCaps, HIDD_ATTRIBUTES, HIDP_CAPS,
-    HIDP_STATUS_SUCCESS, PHIDP_PREPARSED_DATA,
+    HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetFeature, HidD_GetHidGuid, HidD_GetPreparsedData,
+    HidD_SetFeature, HidP_GetCaps, HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS, PHIDP_PREPARSED_DATA,
 };
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-};
-use windows_sys::core::GUID;
+use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
 
 pub struct DeviceInfo {
     pub path: Vec<u16>,
@@ -76,12 +72,7 @@ pub fn enumerate(vid: u16, pid: Option<u16>) -> Vec<DeviceInfo> {
     unsafe {
         let mut guid: GUID = zeroed();
         HidD_GetHidGuid(&mut guid);
-        let set = SetupDiGetClassDevsW(
-            &guid,
-            null(),
-            null_mut(),
-            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
-        );
+        let set = SetupDiGetClassDevsW(&guid, null(), null_mut(), DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
         if set as isize == -1 {
             return out;
         }
@@ -100,12 +91,10 @@ pub fn enumerate(vid: u16, pid: Option<u16>) -> Vec<DeviceInfo> {
                 continue;
             }
             // u64-aligned buffer for the variable-length detail struct.
-            let mut buf = vec![0u64; (needed as usize + 7) / 8];
+            let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
             let detail = buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
             (*detail).cbSize = size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
-            if SetupDiGetDeviceInterfaceDetailW(set, &ifd, detail, needed, null_mut(), null_mut())
-                == 0
-            {
+            if SetupDiGetDeviceInterfaceDetailW(set, &ifd, detail, needed, null_mut(), null_mut()) == 0 {
                 continue;
             }
             let p = (*detail).DevicePath.as_ptr();
@@ -118,9 +107,8 @@ pub fn enumerate(vid: u16, pid: Option<u16>) -> Vec<DeviceInfo> {
             let Some(h) = open_path(&path) else { continue };
             let mut attrs: HIDD_ATTRIBUTES = zeroed();
             attrs.Size = size_of::<HIDD_ATTRIBUTES>() as u32;
-            let ok = HidD_GetAttributes(h, &mut attrs)
-                && attrs.VendorID == vid
-                && pid.map_or(true, |p| attrs.ProductID == p);
+            let ok =
+                HidD_GetAttributes(h, &mut attrs) && attrs.VendorID == vid && pid.is_none_or(|p| attrs.ProductID == p);
             if ok {
                 let mut pre: PHIDP_PREPARSED_DATA = 0;
                 let mut caps: HIDP_CAPS = zeroed();
@@ -158,8 +146,6 @@ impl Device {
 
     /// `buf[0]` must be the report ID; it is filled with the response.
     pub fn get_feature(&self, buf: &mut [u8]) -> bool {
-        unsafe {
-            HidD_GetFeature(self.handle, buf.as_mut_ptr() as *mut c_void, buf.len() as u32)
-        }
+        unsafe { HidD_GetFeature(self.handle, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) }
     }
 }

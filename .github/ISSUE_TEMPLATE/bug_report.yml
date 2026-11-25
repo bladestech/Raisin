@@ -1,0 +1,47 @@
+name: Bug report
+description: Something in Raisin doesn't work as expected.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+
+  - type: input
+    id: mouse
+    attributes:
+      label: Mouse model
+      placeholder: Razer Viper V3 HyperSpeed
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Raisin version
+      description: From the release you downloaded, or the commit if you built it yourself.
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+
+  - type: textarea
+    id: info
+    attributes:
+      label: Output of `raisin info`
+      description: Run `raisin.exe info` in a terminal and paste the output.
+      render: text
+
+  - type: checkboxes
+    id: synapse
+    attributes:
+      label: Razer Synapse
+      options:
+        - label: Synapse is not running (it can overwrite settings and hold the mouse)

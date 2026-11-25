@@ -1,0 +1,49 @@
+name: Device request
+description: Ask for support for another Razer mouse.
+labels: [device]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! The output below tells us how your mouse talks to Windows. It contains no personal information.
+
+  - type: input
+    id: mouse
+    attributes:
+      label: Mouse model
+      placeholder: Razer DeathAdder V3 Pro
+    validations:
+      required: true
+
+  - type: dropdown
+    id: connection
+    attributes:
+      label: How is it connected?
+      multiple: true
+      options:
+        - USB cable
+        - HyperSpeed wireless receiver
+        - Bluetooth
+    validations:
+      required: true
+
+  - type: textarea
+    id: probe
+    attributes:
+      label: Output of `raisin probe`
+      description: Run `raisin.exe probe` in a terminal with the mouse connected and paste the output.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: info
+    attributes:
+      label: Output of `raisin info` (if it ran)
+      render: text
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else?
+      description: Battery type, max DPI, polling rates, or anything Synapse shows for this mouse.

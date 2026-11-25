@@ -91,6 +91,10 @@ impl Config {
     }
 
     pub fn liion_threshold(&self) -> u8 {
-        if self.liion_step { LIION_STEP_THRESHOLD } else { LIION_THRESHOLD }
+        if self.liion_step {
+            LIION_STEP_THRESHOLD
+        } else {
+            LIION_THRESHOLD
+        }
     }
 }
