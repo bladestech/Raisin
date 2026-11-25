@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod config;
+mod devices;
 mod hid;
 mod razer;
 mod tray;
@@ -9,20 +10,24 @@ use config::Config;
 use razer::{BatteryType, DpiStages, Mouse};
 
 const USAGE: &str = "\
-Raisin: Razer Viper V3 HyperSpeed configurator
+Raisin: lightweight Razer mouse configurator
 
   raisin                   run in the system tray
-  raisin info              show battery, DPI, stages, polling rate, sleep timer
+  raisin info              mouse, firmware, battery, DPI, polling rate and more
   raisin dpi <n>           set current DPI
   raisin stages <a,b,..>   set DPI stages (1-5), keeps active stage
   raisin stage <n>         switch to stage n (1-based)
-  raisin poll <125|500|1000>
+  raisin poll <hz>         polling rate (raisin info lists what your mouse supports)
   raisin sleep <seconds>   sleep timer, 60-900
   raisin lowbat <5-30>     red low-battery blink threshold, percent
   raisin battery <alkaline|nimh|lithium|liion|liion-step>
-                           battery type. liion = alkaline curve + 5% blink;
+                           battery type (AA mice). liion = alkaline curve + 5% blink;
                            liion-step = for cells that drop voltage when low
                            (30% blink + Raisin warns on the sudden drop)
+  raisin scroll <tactile|freespin>
+  raisin accel <on|off>    scroll acceleration
+  raisin smartreel <on|off>
+  raisin devices           list supported mice
   raisin probe             list Razer HID interfaces
   raisin scan [ids]        read-only dump of class 0x07 get commands";
 
@@ -125,9 +130,28 @@ fn cli(args: &[String]) -> i32 {
         }
         return 0;
     }
+    if cmd == "devices" {
+        // Every mouse in the table; tested ones marked.
+        for d in devices::DEVICES {
+            let mark = if d.tested() { "tested" } else { "" };
+            println!("1532:{:04X}  {:<52} {mark}", d.pid, d.name);
+        }
+        println!("{} mice", devices::DEVICES.len());
+        return 0;
+    }
     if !matches!(
         cmd,
-        "info" | "dpi" | "stages" | "stage" | "poll" | "sleep" | "lowbat" | "battery"
+        "info"
+            | "dpi"
+            | "stages"
+            | "stage"
+            | "poll"
+            | "sleep"
+            | "lowbat"
+            | "battery"
+            | "scroll"
+            | "accel"
+            | "smartreel"
     ) {
         println!("{USAGE}");
         return if matches!(cmd, "help" | "-h" | "--help") { 0 } else { 2 };
@@ -141,27 +165,15 @@ fn cli(args: &[String]) -> i32 {
         }
     };
     let num = |s: Option<&str>| s.and_then(|s| s.parse::<u16>().ok());
+    let on_off = |s: Option<&str>| match s {
+        Some("on" | "1" | "true") => Some(true),
+        Some("off" | "0" | "false") => Some(false),
+        _ => None,
+    };
 
     let r: razer::Result<()> = (|| {
         match cmd {
-            "info" => {
-                let (pct, raw) = m.battery_raw()?;
-                let mv = m.voltage_mv()?;
-                println!(
-                    "battery:  {pct}% (raw {raw}/255) · ≈{}.{:02} V",
-                    mv / 1000,
-                    mv % 1000 / 10
-                );
-                println!("type:     {}", battery_type_name(&m, &Config::load())?);
-                let (x, y) = m.dpi()?;
-                println!("dpi:      {x} x {y}");
-                let s = m.dpi_stages()?;
-                let list: Vec<String> = s.stages.iter().map(|v| v.0.to_string()).collect();
-                println!("stages:   {} (active {})", list.join(", "), s.active);
-                println!("poll:     {} Hz", m.poll_rate()?);
-                println!("sleep:    {} s", m.idle_time()?);
-                println!("lowbat:   {}", fmt_lowbat(m.low_battery_threshold()?));
-            }
+            "info" => info(&m)?,
             "dpi" => {
                 let Some(v) = num(arg) else {
                     return usage();
@@ -178,8 +190,7 @@ fn cli(args: &[String]) -> i32 {
                     .take(5)
                     .collect();
                 if vals.is_empty() {
-                    println!("{USAGE}");
-                    return Ok(());
+                    return usage();
                 }
                 let cur = m.dpi_stages()?;
                 let active = (cur.active as usize).clamp(1, vals.len()) as u8;
@@ -216,6 +227,10 @@ fn cli(args: &[String]) -> i32 {
                 let Some(v) = num(arg) else {
                     return usage();
                 };
+                if !m.info.poll_rates.contains(&v) {
+                    eprintln!("{} supports: {:?} Hz", m.info.name, m.info.poll_rates);
+                    return Ok(());
+                }
                 m.set_poll_rate(v)?;
                 println!("poll: {} Hz", m.poll_rate()?);
             }
@@ -247,7 +262,7 @@ fn cli(args: &[String]) -> i32 {
                 }
                 cfg.save();
                 println!("battery type: {}", battery_type_name(&m, &cfg)?);
-                println!("battery:      {}%", m.battery()?);
+                println!("battery:      {}", battery_line(&m, &cfg)?);
                 println!("lowbat:       {}", fmt_lowbat(m.low_battery_threshold()?));
             }
             "sleep" => {
@@ -256,6 +271,32 @@ fn cli(args: &[String]) -> i32 {
                 };
                 m.set_idle_time(v)?;
                 println!("sleep: {} s", m.idle_time()?);
+            }
+            "scroll" => {
+                let free = match arg {
+                    Some("freespin" | "free") => true,
+                    Some("tactile") => false,
+                    _ => return usage(),
+                };
+                m.set_free_spin(free)?;
+                println!("scroll wheel: {}", if m.free_spin()? { "free spin" } else { "tactile" });
+            }
+            "accel" => {
+                let Some(on) = on_off(arg) else {
+                    return usage();
+                };
+                m.set_scroll_acceleration(on)?;
+                println!(
+                    "scroll acceleration: {}",
+                    if m.scroll_acceleration()? { "on" } else { "off" }
+                );
+            }
+            "smartreel" => {
+                let Some(on) = on_off(arg) else {
+                    return usage();
+                };
+                m.set_smart_reel(on)?;
+                println!("smart reel: {}", if m.smart_reel()? { "on" } else { "off" });
             }
             _ => unreachable!(),
         }
@@ -268,4 +309,91 @@ fn cli(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// Battery as shown to people: Li-ion as High/Low (the percentage is only
+/// meaningful for the other chemistries).
+fn battery_line(m: &Mouse, cfg: &Config) -> razer::Result<String> {
+    let (pct, raw) = m.battery_raw()?;
+    let mv = opt(m.voltage_mv())?;
+    let volts = mv.map_or(String::new(), |mv| format!(" · ≈{}.{:02} V", mv / 1000, mv % 1000 / 10));
+    let liion = cfg.liion && matches!(opt(m.battery_type())?, Some(Some(BatteryType::Alkaline)));
+    let charging = if opt(m.charging())? == Some(true) {
+        " · charging"
+    } else {
+        ""
+    };
+    Ok(if liion {
+        let level = if config::liion_high(mv, Some(pct)) {
+            "High"
+        } else {
+            "Low"
+        };
+        format!("{level} (Li-ion; {pct}% not meaningful){volts}{charging}")
+    } else {
+        format!("{pct}% (raw {raw}/255){volts}{charging}")
+    })
+}
+
+/// Treat "not supported" as absent; pass other errors through.
+fn opt<T>(r: razer::Result<T>) -> razer::Result<Option<T>> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(razer::Error::NotSupported) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn info(m: &Mouse) -> razer::Result<()> {
+    let d = m.info;
+    let tested = if d.tested() { "tested" } else { "untested with Raisin" };
+    println!(
+        "mouse:    {} (1532:{:04X}, {}, {tested})",
+        d.name,
+        d.pid,
+        m.connection()
+    );
+    if let Some((maj, min)) = opt(m.firmware())? {
+        println!("firmware: v{maj}.{min:02}");
+    }
+    if let Some(s) = opt(m.serial())?.filter(|s| !s.is_empty()) {
+        println!("serial:   {s}");
+    }
+    let cfg = Config::load();
+    if d.battery {
+        println!("battery:  {}", battery_line(m, &cfg)?);
+        if opt(m.battery_type())?.flatten().is_some() {
+            println!("type:     {}", battery_type_name(m, &cfg)?);
+        }
+    }
+    if let Some((x, y)) = opt(m.dpi())? {
+        if x == y {
+            println!("dpi:      {x} (max {})", d.dpi_max);
+        } else {
+            println!("dpi:      {x} x {y} (max {})", d.dpi_max);
+        }
+    }
+    if let Some(s) = opt(m.dpi_stages())? {
+        let list: Vec<String> = s.stages.iter().map(|v| v.0.to_string()).collect();
+        println!("stages:   {} (active {})", list.join(", "), s.active);
+    }
+    if let Some(p) = opt(m.poll_rate())? {
+        println!("poll:     {p} Hz (supports {:?})", d.poll_rates);
+    }
+    if let Some(s) = opt(m.idle_time())? {
+        println!("sleep:    {s} s");
+    }
+    if let Some(l) = opt(m.low_battery_threshold())? {
+        println!("lowbat:   {}", fmt_lowbat(l));
+    }
+    if let Some(f) = opt(m.free_spin())? {
+        println!("scroll:   {}", if f { "free spin" } else { "tactile" });
+    }
+    if let Some(a) = opt(m.scroll_acceleration())? {
+        println!("accel:    {}", if a { "on" } else { "off" });
+    }
+    if let Some(s) = opt(m.smart_reel())? {
+        println!("smartreel:{}", if s { " on" } else { " off" });
+    }
+    Ok(())
 }

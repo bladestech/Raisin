@@ -5,8 +5,8 @@
 <h1 align="center">Raisin</h1>
 
 <p align="center">
-  A tiny, fast replacement for Razer Synapse.<br>
-  DPI stages, polling rate, battery and sleep settings, from a ~480 KB exe that idles at about 2 MB of memory.
+  A tiny, fast replacement for Razer Synapse, for 118 Razer mice.<br>
+  DPI stages, polling rate, battery, scroll wheel and sleep settings, from a ~500 KB exe that idles at about 2 MB of memory.
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshot.png" width="436" alt="Raisin settings window showing battery level and voltage, battery type, DPI stages, polling rate, sleep timer and tray icon options">
+  <img src="docs/screenshot.png" width="436" alt="Raisin settings window for a Viper V3 HyperSpeed: a Li-ion battery shown as High with the percentage crossed out, voltage, battery type, DPI stages, polling rate, sleep timer, tray icon options and firmware details">
 </p>
 
 ## Why
@@ -25,31 +25,36 @@ Synapse is a large Electron app with several background services, and it typical
 
 | | Raisin |
 |---|---|
-| Download | one `raisin.exe`, about 480 KB, no installer |
+| Download | one `raisin.exe`, about 500 KB, no installer |
 | Memory, in the tray | about 2 MB |
 | Memory, settings window open | about 11 MB (a separate process that exits when you close it) |
 | Drivers or services | none |
 
 ## Features
 
-- **DPI stages**: up to 5 stages, pick the active one, edit values with steppers or the scroll wheel.
-- **Polling rate**: 125, 500 or 1000 Hz.
-- **Battery**: level, approximate cell voltage, and a tray icon gauge that turns orange and red as it drains.
-- **Battery type**: Alkaline, NiMH or Lithium discharge curves, plus a **Li-ion 1.5 V** profile for regulated rechargeable AAs (see [Battery notes](#battery-notes)).
+- **DPI stages**: up to 5 stages, pick the active one, edit values with steppers or the scroll wheel. Mice without stages get a single DPI control.
+- **Polling rate**: whatever your mouse supports, from 125 Hz up to 8000 Hz on HyperPolling models.
+- **Battery**: level, charging status, approximate cell voltage on AA mice, and a tray icon gauge that turns orange and red as it drains.
+- **Battery type** (AA mice): Alkaline, NiMH or Lithium discharge curves, plus a **Li-ion 1.5 V** profile for regulated rechargeable AAs that shows **High** or **Low** instead of a misleading percentage (see [Battery notes](#battery-notes)).
 - **Low-battery warning**: set where the mouse starts blinking red (5 to 30%), with a matching Windows notification.
+- **Scroll wheel** (Basilisk V3 family): free spin or tactile, scroll acceleration, Smart Reel.
 - **Sleep timer**: 1 to 15 minutes.
+- **Mouse details**: model, firmware version, USB ID, connection, and a one-click serial number copy for warranty claims.
 - **Tray icon**: battery gauge, logo, or alternating between them.
 - **Start with Windows**, and a **command line** for scripts and hotkeys.
 
-Settings are written to the mouse's own memory, so they stick even when Raisin isn't running.
+The settings window only shows what your mouse supports, and settings are written to the mouse's own memory, so they stick even when Raisin isn't running. No RGB lighting control, by design.
 
 ## Supported mice
 
-| Mouse | USB ID | Status |
-|---|---|---|
-| Razer Viper V3 HyperSpeed | `1532:00B8` | Tested |
+Raisin knows **118 Razer mice**, from the 2012 Naga to the Viper V4 Pro, including wired, wireless and HyperPolling models. See the [full list](docs/devices.md) or run `raisin devices`.
 
-More models are planned. If you have a Razer mouse you'd like supported, please [open a device request](https://github.com/bladestech/Raisin/issues/new?template=device_request.yml) with the output of `raisin probe`.
+| Status | Models |
+|---|---|
+| Tested with Raisin | Razer Viper V3 HyperSpeed (`1532:00B8`) |
+| Supported, untested | 117 more, using device details from [OpenRazer](https://github.com/openrazer/openrazer) |
+
+The protocol is shared across these mice and the details per model come from OpenRazer's well-tested Linux driver, so untested models are expected to work. If yours does (or doesn't), please [open an issue](https://github.com/bladestech/Raisin/issues/new?template=device_request.yml) with the output of `raisin info`, so it can be marked tested or fixed. A few very old mice that use a different protocol (DeathAdder 3.5G, Orochi 2011) aren't supported.
 
 ## Install
 
@@ -71,14 +76,18 @@ If Synapse is installed, quit it first: it overwrites settings and can hold the 
 
 ```text
 raisin                      run in the system tray
-raisin info                 battery, voltage, DPI, stages, polling rate, sleep timer
+raisin info                 mouse, firmware, battery, DPI, polling rate and more
 raisin dpi <n>              set the current DPI
 raisin stages <a,b,...>     set 1-5 DPI stages (keeps the active stage)
 raisin stage <n>            switch to stage n
-raisin poll <125|500|1000>  polling rate
+raisin poll <hz>            polling rate (info lists what your mouse supports)
 raisin sleep <seconds>      sleep timer, 60-900
 raisin lowbat <5-30>        red low-battery blink threshold, percent
 raisin battery <alkaline|nimh|lithium|liion|liion-step>
+raisin scroll <tactile|freespin>
+raisin accel <on|off>       scroll acceleration
+raisin smartreel <on|off>
+raisin devices              list supported mice
 raisin probe                list Razer HID interfaces (for bug reports)
 raisin scan [ids]           read-only dump of battery-class commands
 raisin --settings           open just the settings window
@@ -88,7 +97,7 @@ raisin --settings           open just the settings window
 
 The mouse turns cell voltage into a percentage using a discharge curve for the battery type you choose. A wrong type gives wrong readings: on the **Lithium** curve, which expects about 1.8 V when full, a fresh 1.5 V alkaline reads only around 40%.
 
-**Li-ion 1.5 V rechargeable AAs** hold a flat 1.5 V until they're nearly empty, then cut off, so no voltage curve can show their real charge. Raisin's Li-ion profile uses the alkaline curve (so they read near full instead of half) with a 5% warning, which stops false low-battery blinking. If your cells drop their voltage on purpose when nearly empty, turn on **Li-ion cells drop voltage when low**: Raisin raises the warning to 30% and notifies you when the reading suddenly falls.
+**Li-ion 1.5 V rechargeable AAs** hold a flat 1.5 V until they're nearly empty, then cut off, so no voltage curve can show their real charge. Raisin's Li-ion profile uses the alkaline curve with a 5% warning, which stops false low-battery blinking, and shows the level as **High** or **Low** (below 1.40 V) instead of a percentage. The mouse's percentage stays visible, small and crossed out, since it isn't meaningful for these cells. If your cells drop their voltage on purpose when nearly empty, turn on **Li-ion cells drop voltage when low**: Raisin raises the warning to 30% and notifies you when the reading suddenly falls.
 
 The voltage shown is approximate: it's measured by the mouse under load, so it reads about 0.01 to 0.03 V below a multimeter.
 
@@ -98,7 +107,7 @@ Razer mice show up in Windows as standard HID devices. Raisin sends Razer's 90-b
 
 The tray process uses only plain Win32. The settings window is drawn with Direct2D and DirectWrite on a Windows 11 acrylic backdrop and runs as a separate `raisin.exe --settings` process, so the graphics libraries' memory is returned to Windows when you close it.
 
-The packet format and every command Raisin uses, including a few not documented elsewhere (battery type, live cell voltage), are in [docs/protocol.md](docs/protocol.md).
+Each model's details (USB ID, transaction ID, receiver timing, DPI and polling limits, which features it has) are in a table generated from OpenRazer by [`tools/openrazer_devices.py`](tools/openrazer_devices.py). The packet format and every command Raisin uses, including a few not documented elsewhere (battery type, live cell voltage), are in [docs/protocol.md](docs/protocol.md).
 
 ## Building from source
 

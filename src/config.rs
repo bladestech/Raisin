@@ -42,6 +42,20 @@ pub struct Config {
     pub tray_icon: TrayIcon,
 }
 
+/// Regulated Li-ion AAs sit near 1.5 V until they're nearly empty, then
+/// drop (smart cells drop on purpose). Below this, show "Low".
+pub const LIION_LOW_MV: u16 = 1400;
+
+/// Li-ion level as High/Low: from voltage when the mouse reports it,
+/// otherwise from the (unreliable) percentage.
+pub fn liion_high(voltage_mv: Option<u16>, percent: Option<u8>) -> bool {
+    match (voltage_mv, percent) {
+        (Some(mv), _) => mv >= LIION_LOW_MV,
+        (None, Some(p)) => p >= 50,
+        (None, None) => true,
+    }
+}
+
 /// Mouse threshold for the Li-ion profile: barely ever fires.
 pub const LIION_THRESHOLD: u8 = 5;
 /// With a low-voltage step: the highest threshold the mouse honors, so the
