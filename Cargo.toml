@@ -1,8 +1,8 @@
 [package]
 name = "raisin"
-version = "0.1.0"
+version = "0.1.5"
 edition = "2021"
-description = "Tiny Razer Viper V3 HyperSpeed configurator (DPI, polling rate, battery)"
+description = "Lightweight Razer mouse configurator for Windows (DPI, polling rate, battery)"
 license = "MIT"
 repository = "https://github.com/bladestech/Raisin"
 readme = "README.md"
