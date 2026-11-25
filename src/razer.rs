@@ -1,23 +1,19 @@
-//! Razer HID protocol (90-byte feature reports), per OpenRazer.
+//! Razer HID protocol (90-byte feature reports). See docs/protocol.md.
 
 use std::thread::sleep;
 use std::time::Duration;
 
-use crate::hid::{self, Device};
+use crate::devices::{Device, DpiCmd, PollCmd};
+use crate::hid;
 
 pub const VID_RAZER: u16 = 0x1532;
-pub const PID_VIPER_V3_HYPERSPEED: u16 = 0x00B8;
-pub const DPI_MAX: u16 = 30000;
 pub const DPI_MIN: u16 = 100;
-pub const POLL_RATES: [u16; 3] = [125, 500, 1000];
 
-const TRANSACTION_ID: u8 = 0x1F;
 const REPORT_LEN: usize = 90;
-/// Wireless receiver needs ~60 ms between SET and GET (OpenRazer: 59900 us).
-const RECEIVER_WAIT: Duration = Duration::from_micros(59_900);
-
 const VARSTORE: u8 = 0x01;
 const NOSTORE: u8 = 0x00;
+/// Older mice scale one DPI byte over 0-6750 DPI.
+const BYTE_DPI_SCALE: u32 = 6750;
 
 #[derive(Debug)]
 pub enum Error {
@@ -33,12 +29,12 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            Error::NotFound => "mouse not found",
+            Error::NotFound => "no supported Razer mouse found",
             Error::Io => "HID transfer failed",
             Error::Busy => "device busy",
             Error::Failure => "command failed",
             Error::Timeout => "no response (mouse asleep or off?)",
-            Error::NotSupported => "command not supported",
+            Error::NotSupported => "not supported by this mouse",
             Error::Mismatch => "unexpected response",
         };
         f.write_str(s)
@@ -46,10 +42,6 @@ impl std::fmt::Display for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-pub struct Mouse {
-    dev: Device,
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DpiStages {
@@ -59,7 +51,7 @@ pub struct DpiStages {
 }
 
 /// Low-battery blink choices (percent). The firmware ignores values
-/// outside 5-30% (tested: 0 and 50% have no effect).
+/// outside 5-30% (tested on the Viper V3 HyperSpeed: 0 and 50% have no effect).
 pub const LOW_BATTERY_CHOICES: [u8; 6] = [5, 10, 15, 20, 25, 30];
 
 /// Discharge curve the mouse uses to turn cell voltage into a level.
@@ -102,9 +94,9 @@ pub fn raw_to_percent(raw: u8) -> u8 {
     ((raw as u32 * 100 + 127) / 255) as u8
 }
 
-fn build(class: u8, id: u8, size: u8, args: &[u8]) -> [u8; REPORT_LEN] {
+fn build(tid: u8, class: u8, id: u8, size: u8, args: &[u8]) -> [u8; REPORT_LEN] {
     let mut r = [0u8; REPORT_LEN];
-    r[1] = TRANSACTION_ID;
+    r[1] = tid;
     r[5] = size;
     r[6] = class;
     r[7] = id;
@@ -113,18 +105,49 @@ fn build(class: u8, id: u8, size: u8, args: &[u8]) -> [u8; REPORT_LEN] {
     r
 }
 
+fn hyper_code(hz: u16) -> Option<u8> {
+    Some(match hz {
+        8000 => 0x01,
+        4000 => 0x02,
+        2000 => 0x04,
+        1000 => 0x08,
+        500 => 0x10,
+        250 => 0x20,
+        125 => 0x40,
+        _ => return None,
+    })
+}
+
+fn standard_code(hz: u16) -> Option<u8> {
+    Some(match hz {
+        1000 => 0x01,
+        500 => 0x02,
+        125 => 0x08,
+        _ => return None,
+    })
+}
+
+/// A connected mouse and the table entry describing it.
+pub struct Mouse {
+    hid: hid::Device,
+    pub info: &'static Device,
+}
+
 impl Mouse {
-    /// Find the receiver/mouse and the HID collection that answers the
-    /// Razer protocol.
+    /// Find the first connected mouse from the device table and the HID
+    /// collection that answers the Razer protocol.
     pub fn open() -> Result<Mouse> {
-        let infos = hid::enumerate(VID_RAZER, Some(PID_VIPER_V3_HYPERSPEED));
         // Collections that expose a 90-byte feature report (+1 for report ID).
-        for info in infos.iter().filter(|i| i.feature_len as usize == REPORT_LEN + 1) {
-            let Some(dev) = Device::open(info) else { continue };
-            let m = Mouse { dev };
+        for hi in hid::enumerate(VID_RAZER, None) {
+            if hi.feature_len as usize != REPORT_LEN + 1 {
+                continue;
+            }
+            let Some(info) = Device::find(hi.pid) else { continue };
+            let Some(dev) = hid::Device::open(&hi) else { continue };
+            let m = Mouse { hid: dev, info };
             // Probe with a harmless query. A sleeping mouse may answer
             // Timeout, which still proves this collection speaks the protocol.
-            match m.transact(0x00, 0x85, 0x01, &[]) {
+            match m.firmware() {
                 Ok(_) | Err(Error::Timeout) => return Ok(m),
                 Err(_) => continue,
             }
@@ -132,18 +155,31 @@ impl Mouse {
         Err(Error::NotFound)
     }
 
+    /// "Wireless" when the model needs a receiver delay, else "Wired".
+    pub fn connection(&self) -> &'static str {
+        if self.info.wait_us > 600 {
+            "Wireless"
+        } else {
+            "Wired"
+        }
+    }
+
+    fn wait(&self) -> Duration {
+        Duration::from_micros(self.info.wait_us as u64)
+    }
+
     /// Send one request and return the raw response regardless of status
     /// (for read-only exploration).
     pub fn raw(&self, class: u8, id: u8, size: u8, args: &[u8]) -> Option<[u8; REPORT_LEN]> {
-        let req = build(class, id, size, args);
+        let req = build(self.info.tid.dpi, class, id, size, args);
         let mut out = [0u8; REPORT_LEN + 1];
         out[1..].copy_from_slice(&req);
-        if !self.dev.set_feature(&out) {
+        if !self.hid.set_feature(&out) {
             return None;
         }
-        sleep(RECEIVER_WAIT);
+        sleep(self.wait());
         let mut inp = [0u8; REPORT_LEN + 1];
-        if !self.dev.get_feature(&mut inp) {
+        if !self.hid.get_feature(&mut inp) {
             return None;
         }
         let mut resp = [0u8; REPORT_LEN];
@@ -151,20 +187,20 @@ impl Mouse {
         Some(resp)
     }
 
-    fn transact(&self, class: u8, id: u8, size: u8, args: &[u8]) -> Result<[u8; REPORT_LEN]> {
-        let req = build(class, id, size, args);
+    fn transact(&self, tid: u8, class: u8, id: u8, size: u8, args: &[u8]) -> Result<[u8; REPORT_LEN]> {
+        let req = build(tid, class, id, size, args);
         let mut last = Error::Io;
         for _ in 0..5 {
             let mut out = [0u8; REPORT_LEN + 1];
             out[1..].copy_from_slice(&req);
-            if !self.dev.set_feature(&out) {
+            if !self.hid.set_feature(&out) {
                 last = Error::Io;
                 sleep(Duration::from_millis(10));
                 continue;
             }
-            sleep(RECEIVER_WAIT);
+            sleep(self.wait());
             let mut inp = [0u8; REPORT_LEN + 1];
-            if !self.dev.get_feature(&mut inp) {
+            if !self.hid.get_feature(&mut inp) {
                 last = Error::Io;
                 sleep(Duration::from_millis(10));
                 continue;
@@ -178,9 +214,7 @@ impl Mouse {
             }
             match resp[0] {
                 0x02 => return Ok(resp),
-                0x01 => {
-                    last = Error::Busy;
-                }
+                0x01 => last = Error::Busy,
                 0x03 => return Err(Error::Failure),
                 0x04 => return Err(Error::Timeout),
                 0x05 => return Err(Error::NotSupported),
@@ -191,52 +225,76 @@ impl Mouse {
         Err(last)
     }
 
-    /// Battery percentage (0-100).
-    pub fn battery(&self) -> Result<u8> {
-        self.battery_raw().map(|b| b.0)
+    fn require(&self, supported: bool) -> Result<()> {
+        if supported {
+            Ok(())
+        } else {
+            Err(Error::NotSupported)
+        }
     }
 
-    /// (percent, raw 0-255)
-    pub fn battery_raw(&self) -> Result<(u8, u8)> {
-        let r = self.transact(0x07, 0x80, 0x02, &[])?;
-        Ok((((r[9] as u32 * 100 + 127) / 255) as u8, r[9]))
+    // ---- device info ----
+
+    /// Firmware version (major, minor).
+    pub fn firmware(&self) -> Result<(u8, u8)> {
+        let r = self.transact(self.info.tid.dpi, 0x00, 0x81, 0x02, &[])?;
+        Ok((r[8], r[9]))
     }
+
+    pub fn serial(&self) -> Result<String> {
+        let r = self.transact(self.info.tid.dpi, 0x00, 0x82, 0x16, &[])?;
+        let s: String = r[8..8 + 0x16]
+            .iter()
+            .take_while(|&&b| b != 0)
+            .filter(|b| b.is_ascii_graphic())
+            .map(|&b| b as char)
+            .collect();
+        Ok(s)
+    }
+
+    // ---- DPI ----
 
     pub fn dpi(&self) -> Result<(u16, u16)> {
-        let r = self.transact(0x04, 0x85, 0x07, &[NOSTORE])?;
-        Ok((u16::from_be_bytes([r[9], r[10]]), u16::from_be_bytes([r[11], r[12]])))
+        let t = self.info.tid.dpi;
+        match self.info.dpi {
+            DpiCmd::Xy => {
+                let r = self.transact(t, 0x04, 0x85, 0x07, &[NOSTORE])?;
+                Ok((u16::from_be_bytes([r[9], r[10]]), u16::from_be_bytes([r[11], r[12]])))
+            }
+            DpiCmd::Byte => {
+                let r = self.transact(t, 0x04, 0x81, 0x03, &[])?;
+                let un = |b: u8| ((b as u32 * BYTE_DPI_SCALE + 127) / 255) as u16;
+                Ok((un(r[8]), un(r[9])))
+            }
+            DpiCmd::None => Err(Error::NotSupported),
+        }
+    }
+
+    pub fn clamp_dpi(&self, v: u16) -> u16 {
+        v.clamp(DPI_MIN, self.info.dpi_max.max(DPI_MIN))
     }
 
     pub fn set_dpi(&self, x: u16, y: u16) -> Result<()> {
-        let x = x.clamp(DPI_MIN, DPI_MAX).to_be_bytes();
-        let y = y.clamp(DPI_MIN, DPI_MAX).to_be_bytes();
-        self.transact(0x04, 0x05, 0x07, &[NOSTORE, x[0], x[1], y[0], y[1], 0, 0])?;
-        Ok(())
-    }
-
-    pub fn poll_rate(&self) -> Result<u16> {
-        let r = self.transact(0x00, 0x85, 0x01, &[])?;
-        Ok(match r[8] {
-            0x01 => 1000,
-            0x02 => 500,
-            0x08 => 125,
-            _ => 0,
-        })
-    }
-
-    pub fn set_poll_rate(&self, hz: u16) -> Result<()> {
-        let v = match hz {
-            1000 => 0x01,
-            500 => 0x02,
-            125 => 0x08,
-            _ => return Err(Error::NotSupported),
-        };
-        self.transact(0x00, 0x05, 0x01, &[v])?;
+        let t = self.info.tid.dpi;
+        let (x, y) = (self.clamp_dpi(x), self.clamp_dpi(y));
+        match self.info.dpi {
+            DpiCmd::Xy => {
+                let (x, y) = (x.to_be_bytes(), y.to_be_bytes());
+                self.transact(t, 0x04, 0x05, 0x07, &[NOSTORE, x[0], x[1], y[0], y[1], 0, 0])?;
+            }
+            DpiCmd::Byte => {
+                let sc =
+                    |v: u16| ((v.min(BYTE_DPI_SCALE as u16) as u32 * 255 + BYTE_DPI_SCALE / 2) / BYTE_DPI_SCALE) as u8;
+                self.transact(t, 0x04, 0x01, 0x03, &[sc(x), sc(y), 0])?;
+            }
+            DpiCmd::None => return Err(Error::NotSupported),
+        }
         Ok(())
     }
 
     pub fn dpi_stages(&self) -> Result<DpiStages> {
-        let r = self.transact(0x04, 0x86, 0x26, &[VARSTORE])?;
+        self.require(self.info.stages)?;
+        let r = self.transact(self.info.tid.stages, 0x04, 0x86, 0x26, &[VARSTORE])?;
         let a = &r[8..];
         let active = a[1];
         let count = (a[2] as usize).min(5);
@@ -250,30 +308,96 @@ impl Mouse {
 
     /// Writes stages to onboard memory. `active` is 1-based.
     pub fn set_dpi_stages(&self, s: &DpiStages) -> Result<()> {
+        self.require(self.info.stages)?;
         let count = s.stages.len().clamp(1, 5);
         let mut args = vec![0u8; 3 + count * 7];
         args[0] = VARSTORE;
         args[1] = s.active.clamp(1, count as u8);
         args[2] = count as u8;
         for (i, &(x, y)) in s.stages.iter().take(count).enumerate() {
-            let x = x.clamp(DPI_MIN, DPI_MAX).to_be_bytes();
-            let y = y.clamp(DPI_MIN, DPI_MAX).to_be_bytes();
+            let x = self.clamp_dpi(x).to_be_bytes();
+            let y = self.clamp_dpi(y).to_be_bytes();
             let o = 3 + i * 7;
             args[o] = (i + 1) as u8;
             args[o + 1..o + 5].copy_from_slice(&[x[0], x[1], y[0], y[1]]);
         }
-        self.transact(0x04, 0x06, 0x26, &args)?;
+        self.transact(self.info.tid.stages, 0x04, 0x06, 0x26, &args)?;
         Ok(())
+    }
+
+    // ---- polling rate ----
+
+    pub fn poll_rate(&self) -> Result<u16> {
+        let t = self.info.tid.poll;
+        match self.info.poll {
+            PollCmd::Standard => {
+                let r = self.transact(t, 0x00, 0x85, 0x01, &[])?;
+                Ok([1000, 500, 125]
+                    .into_iter()
+                    .find(|&hz| standard_code(hz) == Some(r[8]))
+                    .unwrap_or(0))
+            }
+            PollCmd::Hyper => {
+                let r = self.transact(t, 0x00, 0xC0, 0x01, &[])?;
+                let rates = [8000, 4000, 2000, 1000, 500, 250, 125];
+                Ok(rates.into_iter().find(|&hz| hyper_code(hz) == Some(r[9])).unwrap_or(0))
+            }
+            PollCmd::None => Err(Error::NotSupported),
+        }
+    }
+
+    pub fn set_poll_rate(&self, hz: u16) -> Result<()> {
+        if !self.info.poll_rates.contains(&hz) {
+            return Err(Error::NotSupported);
+        }
+        let t = self.info.tid.poll;
+        match self.info.poll {
+            PollCmd::Standard => {
+                let code = standard_code(hz).ok_or(Error::NotSupported)?;
+                self.transact(t, 0x00, 0x05, 0x01, &[code])?;
+            }
+            PollCmd::Hyper => {
+                // Razer sends each HyperPolling request with 0x00, then 0x01.
+                let code = hyper_code(hz).ok_or(Error::NotSupported)?;
+                self.transact(t, 0x00, 0x40, 0x02, &[0x00, code])?;
+                let t2 = self.info.poll_tid2.unwrap_or(t);
+                self.transact(t2, 0x00, 0x40, 0x02, &[0x01, code])?;
+            }
+            PollCmd::None => return Err(Error::NotSupported),
+        }
+        Ok(())
+    }
+
+    // ---- battery and power ----
+
+    /// Battery percentage (0-100).
+    pub fn battery(&self) -> Result<u8> {
+        self.battery_raw().map(|b| b.0)
+    }
+
+    /// (percent, raw 0-255)
+    pub fn battery_raw(&self) -> Result<(u8, u8)> {
+        self.require(self.info.battery)?;
+        let r = self.transact(self.info.tid.power, 0x07, 0x80, 0x02, &[])?;
+        Ok((raw_to_percent(r[9]), r[9]))
+    }
+
+    pub fn charging(&self) -> Result<bool> {
+        self.require(self.info.charging)?;
+        let r = self.transact(self.info.tid.power, 0x07, 0x84, 0x02, &[])?;
+        Ok(r[9] != 0)
     }
 
     /// Battery level (raw 0-255) below which the mouse blinks its LED red.
     pub fn low_battery_threshold(&self) -> Result<u8> {
-        let r = self.transact(0x07, 0x81, 0x01, &[])?;
+        self.require(self.info.low_battery)?;
+        let r = self.transact(self.info.tid.power, 0x07, 0x81, 0x01, &[])?;
         Ok(r[8])
     }
 
     pub fn set_low_battery_threshold(&self, raw: u8) -> Result<()> {
-        self.transact(0x07, 0x01, 0x01, &[raw])?;
+        self.require(self.info.low_battery)?;
+        self.transact(self.info.tid.power, 0x07, 0x01, 0x01, &[raw])?;
         Ok(())
     }
 
@@ -287,33 +411,80 @@ impl Mouse {
     /// big-endian value that tracks the cell. Treated as a 12-bit ADC with a
     /// 1.8 V reference. Checked against a multimeter: fresh alkaline 1.59 V
     /// (meter ~1.60 V), used alkaline 1.35 V (meter 1.38 V). Reads slightly
-    /// low because the mouse measures under load.
+    /// low because the mouse measures under load. Other models may answer
+    /// "not supported".
     pub fn voltage_mv(&self) -> Result<u16> {
-        let r = self.transact(0x07, 0x85, 0x03, &[])?;
+        self.require(self.info.battery)?;
+        let r = self.transact(self.info.tid.power, 0x07, 0x85, 0x03, &[])?;
         let raw = u16::from_be_bytes([r[9], r[10]]) as u32;
         Ok((raw * 1800 / 4095) as u16)
     }
 
+    /// Battery chemistry setting (AA mice). Other models may answer
+    /// "not supported".
     pub fn battery_type(&self) -> Result<Option<BatteryType>> {
-        let r = self.transact(0x07, 0x94, 0x01, &[])?;
+        self.require(self.info.battery)?;
+        let r = self.transact(self.info.tid.power, 0x07, 0x94, 0x01, &[])?;
         Ok(BatteryType::ALL.into_iter().find(|t| *t as u8 == r[8]))
     }
 
     pub fn set_battery_type(&self, t: BatteryType) -> Result<()> {
-        self.transact(0x07, 0x14, 0x01, &[t as u8])?;
+        self.require(self.info.battery)?;
+        self.transact(self.info.tid.power, 0x07, 0x14, 0x01, &[t as u8])?;
         Ok(())
     }
 
     /// Seconds of inactivity before the mouse sleeps.
     pub fn idle_time(&self) -> Result<u16> {
-        let r = self.transact(0x07, 0x83, 0x02, &[])?;
+        self.require(self.info.idle)?;
+        let r = self.transact(self.info.tid.power, 0x07, 0x83, 0x02, &[])?;
         Ok(u16::from_be_bytes([r[8], r[9]]))
     }
 
     pub fn set_idle_time(&self, secs: u16) -> Result<()> {
+        self.require(self.info.idle)?;
         let b = secs.clamp(60, 900).to_be_bytes();
-        self.transact(0x07, 0x03, 0x02, &b)?;
+        self.transact(self.info.tid.power, 0x07, 0x03, 0x02, &b)?;
         Ok(())
+    }
+
+    // ---- scroll wheel ----
+
+    fn scroll_get(&self, supported: bool, id: u8) -> Result<bool> {
+        self.require(supported)?;
+        let r = self.transact(self.info.tid.scroll, 0x02, id, 0x02, &[VARSTORE])?;
+        Ok(r[9] != 0)
+    }
+
+    fn scroll_set(&self, supported: bool, id: u8, on: bool) -> Result<()> {
+        self.require(supported)?;
+        self.transact(self.info.tid.scroll, 0x02, id, 0x02, &[VARSTORE, on as u8])?;
+        Ok(())
+    }
+
+    /// true = free spin, false = tactile.
+    pub fn free_spin(&self) -> Result<bool> {
+        self.scroll_get(self.info.scroll_mode, 0x94)
+    }
+
+    pub fn set_free_spin(&self, on: bool) -> Result<()> {
+        self.scroll_set(self.info.scroll_mode, 0x14, on)
+    }
+
+    pub fn scroll_acceleration(&self) -> Result<bool> {
+        self.scroll_get(self.info.scroll_accel, 0x96)
+    }
+
+    pub fn set_scroll_acceleration(&self, on: bool) -> Result<()> {
+        self.scroll_set(self.info.scroll_accel, 0x16, on)
+    }
+
+    pub fn smart_reel(&self) -> Result<bool> {
+        self.scroll_get(self.info.smart_reel, 0x97)
+    }
+
+    pub fn set_smart_reel(&self, on: bool) -> Result<()> {
+        self.scroll_set(self.info.smart_reel, 0x17, on)
     }
 }
 
@@ -323,8 +494,8 @@ mod tests {
 
     #[test]
     fn report_layout_and_crc() {
-        let r = build(0x04, 0x05, 0x07, &[1, 2, 3]);
-        assert_eq!(r[1], TRANSACTION_ID);
+        let r = build(0x1F, 0x04, 0x05, 0x07, &[1, 2, 3]);
+        assert_eq!(r[1], 0x1F);
         assert_eq!((r[5], r[6], r[7]), (0x07, 0x04, 0x05));
         assert_eq!(&r[8..11], &[1, 2, 3]);
         // CRC is the XOR of bytes 2..=87.
@@ -353,5 +524,15 @@ mod tests {
             assert_eq!(BatteryType::parse(&key), Some(t));
         }
         assert_eq!(BatteryType::parse("liion"), None); // a Raisin profile, not a mouse type
+    }
+
+    #[test]
+    fn polling_codes_match_openrazer() {
+        assert_eq!(standard_code(1000), Some(0x01));
+        assert_eq!(standard_code(125), Some(0x08));
+        assert_eq!(standard_code(250), None);
+        assert_eq!(hyper_code(8000), Some(0x01));
+        assert_eq!(hyper_code(250), Some(0x20));
+        assert_eq!(hyper_code(125), Some(0x40));
     }
 }

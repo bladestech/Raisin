@@ -12,7 +12,11 @@ On Windows:
 2. Open it with `CreateFileW` and **zero access rights** (shared read/write). Windows holds mouse collections exclusively, but feature reports still work on a handle opened this way.
 3. Send a request with `HidD_SetFeature`, wait, then read the response with `HidD_GetFeature`.
 
-Wireless receivers need a delay between the two calls. OpenRazer uses 59.9 ms for the Viper V3 HyperSpeed; Raisin uses the same.
+Wireless receivers need a delay between the two calls. Raisin uses OpenRazer's per-model values: 0.6 ms for most wired mice, 31 ms for most receivers, 59.9 ms for the Viper V3 HyperSpeed and similar, and 400 ms for the Atheris receiver.
+
+### Per-model details
+
+Mice differ in their transaction ID (`0x1F`, `0x3F` or `0xFF`; a few models use different IDs for different features), receiver delay, DPI and polling commands, limits, and which features exist. Raisin keeps these in [`src/devices_table.rs`](../src/devices_table.rs), generated from OpenRazer's driver and daemon by [`tools/openrazer_devices.py`](../tools/openrazer_devices.py).
 
 ## Packet layout (90 bytes)
 
@@ -49,10 +53,14 @@ A valid response echoes the request's class, command ID and remaining-packets fi
 
 | Command | Class/ID | Size | Arguments |
 |---|---|---|---|
+| Get firmware version | `00/81` | 2 | response `arg[0]` = major, `arg[1]` = minor |
+| Get serial number | `00/82` | 22 | response `arg[0..22]` = ASCII, zero-padded |
 | Get polling rate | `00/85` | 1 | response `arg[0]`: `0x01` = 1000 Hz, `0x02` = 500 Hz, `0x08` = 125 Hz |
 | Set polling rate | `00/05` | 1 | `arg[0]` as above |
+| Get HyperPolling rate | `00/C0` | 1 | response `arg[1]`: `0x01` = 8000, `0x02` = 4000, `0x04` = 2000, `0x08` = 1000, `0x10` = 500, `0x20` = 250, `0x40` = 125 Hz |
+| Set HyperPolling rate | `00/40` | 2 | `arg[0]` = `0x00`, then sent again with `0x01`; `arg[1]` as above |
 
-Mice with 2000 to 8000 Hz support use a different pair, `00/C0` and `00/40`, which Raisin does not use yet.
+HyperPolling mice (up to 8000 Hz) use the `00/C0` and `00/40` pair. Razer's software sends each set request twice, first with `arg[0] = 0x00` and then with `0x01`; on three models (Viper 8KHz, the HyperPolling dongle and a DeathAdder V3 Pro variant) the second request uses transaction ID `0xFF`.
 
 ### DPI
 
@@ -63,7 +71,27 @@ Mice with 2000 to 8000 Hz support use a different pair, `00/C0` and `00/40`, whi
 | Get DPI stages | `04/86` | 38 | request `arg[0]` = `VARSTORE`; response as below |
 | Set DPI stages | `04/06` | 38 | `arg[0]` = store, `arg[1]` = active stage (1-based), `arg[2]` = count (1 to 5), then 7 bytes per stage from `arg[3]`: index, X (2), Y (2), `0`, `0` |
 
-The Viper V3 HyperSpeed accepts 100 to 30000 DPI.
+The Viper V3 HyperSpeed accepts 100 to 30000 DPI; other models' limits are in the device table.
+
+Some older mice (Naga 2012, DeathAdder 2013 and similar) use one byte per axis instead:
+
+| Command | Class/ID | Size | Arguments |
+|---|---|---|---|
+| Get DPI (byte) | `04/81` | 3 | response `arg[0]` = X, `arg[1]` = Y |
+| Set DPI (byte) | `04/01` | 3 | `arg[0]` = X, `arg[1]` = Y, `arg[2]` = `0` |
+
+The byte is scaled over 0 to 6750 DPI: `byte = dpi * 255 / 6750`.
+
+### Scroll wheel (class `0x02`, Basilisk V3 family)
+
+| Command | Class/ID | Size | Arguments |
+|---|---|---|---|
+| Get scroll mode | `02/94` | 2 | request `arg[0]` = `VARSTORE`; response `arg[1]`: `0` = tactile, `1` = free spin |
+| Set scroll mode | `02/14` | 2 | `arg[0]` = `VARSTORE`, `arg[1]` as above |
+| Get scroll acceleration | `02/96` | 2 | response `arg[1]` = `0` or `1` |
+| Set scroll acceleration | `02/16` | 2 | `arg[0]` = `VARSTORE`, `arg[1]` = `0` or `1` |
+| Get Smart Reel | `02/97` | 2 | response `arg[1]` = `0` or `1` |
+| Set Smart Reel | `02/17` | 2 | `arg[0]` = `VARSTORE`, `arg[1]` = `0` or `1` |
 
 ### Power and battery (class `0x07`)
 

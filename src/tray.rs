@@ -17,7 +17,8 @@ use windows_sys::Win32::UI::HiDpi::{
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-use crate::config::{Config, TrayIcon};
+use crate::config::{self, Config, TrayIcon};
+use crate::devices::Device;
 use crate::razer::{self, BatteryType, DpiStages, Error, Mouse};
 
 const WM_TRAY: u32 = WM_APP + 1;
@@ -41,6 +42,9 @@ const ID_BATTYPE: usize = 600; // 600..603
 const ID_LIION: usize = 603; // must follow the BatteryType ids (radio group)
 const ID_LIION_STEP: usize = 610;
 const ID_TRAYICON: usize = 700; // 700..703
+const ID_FREESPIN: usize = 800;
+const ID_SCROLL_ACCEL: usize = 801;
+const ID_SMART_REEL: usize = 802;
 /// A drop this large between two readings = Li-ion low-voltage signal.
 const STEP_DROP: u8 = 30;
 const ID_SETTINGS: usize = 400;
@@ -68,9 +72,16 @@ fn copy_w(dst: &mut [u16], s: &str) {
     dst[n] = 0;
 }
 
+/// What we last read from the mouse. `None` fields are unknown or not
+/// supported by this model.
 #[derive(Default)]
 struct State {
+    device: Option<&'static Device>,
+    connection: &'static str,
+    firmware: Option<(u8, u8)>,
+    serial: Option<String>,
     battery: Option<u8>,
+    charging: Option<bool>,
     dpi: Option<(u16, u16)>,
     stages: Option<DpiStages>,
     poll: Option<u16>,
@@ -79,6 +90,9 @@ struct State {
     lowbat: Option<u8>,
     battery_type: Option<BatteryType>,
     voltage_mv: Option<u16>,
+    free_spin: Option<bool>,
+    scroll_accel: Option<bool>,
+    smart_reel: Option<bool>,
     asleep: bool,
     connected: bool,
 }
@@ -147,52 +161,80 @@ impl App {
 
     fn refresh(&mut self, full: bool) {
         self.last_refresh = Some(Instant::now());
+        let prev_pid = self.state.device.map(|d| d.pid);
         let Some(m) = self.mouse() else {
             self.state = State::default();
             self.update_icon();
             return;
         };
+        let device = m.info;
+        let connection = m.connection();
         let battery = m.battery();
         let voltage = m.voltage_mv();
+        let charging = m.charging();
         let dpi = m.dpi();
         let poll = m.poll_rate();
-        let (stages, idle, lowbat, btype) = if full {
+        let full_reads = full.then(|| {
             (
-                Some(m.dpi_stages()),
-                Some(m.idle_time()),
-                Some(m.low_battery_threshold()),
-                Some(m.battery_type()),
+                m.dpi_stages(),
+                m.idle_time(),
+                m.low_battery_threshold(),
+                m.battery_type(),
+                m.free_spin(),
+                m.scroll_acceleration(),
+                m.smart_reel(),
             )
-        } else {
-            (None, None, None, None)
-        };
+        });
+        // Firmware and serial don't change: read them once per mouse.
+        let ident = (prev_pid != Some(device.pid)).then(|| (m.firmware(), m.serial()));
 
+        if prev_pid != Some(device.pid) {
+            self.state = State::default(); // a different mouse was plugged in
+        }
+        self.state.device = Some(device);
+        self.state.connection = connection;
         self.state.connected = true;
         self.state.asleep = false;
-        match battery {
-            Ok(b) => self.state.battery = Some(b),
-            Err(e) => self.note_err(&e),
+
+        // Store a read: "not supported" clears the field, other errors are
+        // classified (asleep, unplugged) and keep the last known value.
+        macro_rules! apply {
+            ($field:ident, $r:expr) => {
+                match $r {
+                    Ok(v) => self.state.$field = Some(v),
+                    Err(Error::NotSupported) => self.state.$field = None,
+                    Err(e) => self.note_err(&e),
+                }
+            };
         }
-        match voltage {
-            Ok(v) => self.state.voltage_mv = Some(v),
-            Err(e) => self.note_err(&e),
+        apply!(battery, battery);
+        apply!(voltage_mv, voltage);
+        apply!(charging, charging);
+        apply!(dpi, dpi);
+        apply!(poll, poll);
+        if let Some((fw, serial)) = ident {
+            apply!(firmware, fw);
+            apply!(serial, serial);
         }
-        match dpi {
-            Ok(d) => self.state.dpi = Some(d),
-            Err(e) => self.note_err(&e),
-        }
-        match poll {
-            Ok(p) => self.state.poll = Some(p),
-            Err(e) => self.note_err(&e),
-        }
-        match stages {
-            Some(Ok(s)) => self.state.stages = Some(s),
-            Some(Err(e)) => self.note_err(&e),
+        match full_reads {
+            Some((stages, idle, lowbat, btype, spin, accel, reel)) => {
+                apply!(stages, stages);
+                apply!(idle, idle);
+                apply!(lowbat, lowbat);
+                match btype {
+                    Ok(t) => self.state.battery_type = t,
+                    Err(Error::NotSupported) => self.state.battery_type = None,
+                    Err(e) => self.note_err(&e),
+                }
+                apply!(free_spin, spin);
+                apply!(scroll_accel, accel);
+                apply!(smart_reel, reel);
+            }
             None => {
                 // Light refresh: follow DPI-button presses by matching the
                 // current DPI to a stage.
                 if let (Some(st), Some((x, _))) = (self.state.stages.as_mut(), self.state.dpi) {
-                    let cur = st.stages.get(st.active as usize - 1).map(|s| s.0);
+                    let cur = st.stages.get((st.active as usize).max(1) - 1).map(|s| s.0);
                     if cur != Some(x) {
                         if let Some(i) = st.stages.iter().position(|s| s.0 == x) {
                             st.active = (i + 1) as u8;
@@ -201,36 +243,65 @@ impl App {
                 }
             }
         }
-        match idle {
-            Some(Ok(i)) => self.state.idle = Some(i),
-            Some(Err(e)) => self.note_err(&e),
-            None => {}
-        }
-        match lowbat {
-            Some(Ok(l)) => self.state.lowbat = Some(l),
-            Some(Err(e)) => self.note_err(&e),
-            None => {}
-        }
-        match btype {
-            Some(Ok(t)) => self.state.battery_type = t,
-            Some(Err(e)) => self.note_err(&e),
-            None => {}
-        }
         self.update_icon();
         self.check_low_battery();
+    }
+
+    /// Li-ion profile active (alkaline curve + Raisin's Li-ion setting).
+    fn liion(&self) -> bool {
+        self.config.liion && self.state.battery_type == Some(BatteryType::Alkaline)
+    }
+
+    /// Li-ion: High/Low from voltage; the percentage isn't meaningful.
+    fn liion_high(&self) -> bool {
+        config::liion_high(self.state.voltage_mv, self.state.battery)
+    }
+
+    /// "87%" or, for Li-ion, "High"/"Low"; plus voltage and charging.
+    fn battery_text(&self) -> Option<String> {
+        let b = self.state.battery?;
+        let level = if self.liion() {
+            if self.liion_high() { "High" } else { "Low" }.to_string()
+        } else {
+            format!("{b}%")
+        };
+        let charging = if self.state.charging == Some(true) {
+            " · charging"
+        } else {
+            ""
+        };
+        Some(format!("{level}{}{charging}", fmt_volts(self.state.voltage_mv)))
+    }
+
+    /// Level for the battery icon (Li-ion: full or nearly empty).
+    fn icon_level(&self) -> Option<u8> {
+        if self.liion() {
+            Some(if self.liion_high() { 100 } else { 5 })
+        } else {
+            self.state.battery
+        }
+    }
+
+    /// Polling rates the connected mouse supports.
+    fn poll_rates(&self) -> &'static [u16] {
+        self.state.device.map_or(&[], |d| d.poll_rates)
+    }
+
+    fn device_name(&self) -> &'static str {
+        self.state.device.map_or("Razer mouse", |d| d.name)
     }
 
     fn tooltip(&self) -> String {
         let s = &self.state;
         if !s.connected {
-            return "Raisin: receiver not found".into();
+            return "Raisin: no supported mouse found".into();
         }
         if s.asleep {
-            return "Raisin: mouse asleep".into();
+            return format!("Raisin: {} asleep", self.device_name());
         }
-        let mut t = String::from("Raisin");
-        if let Some(b) = s.battery {
-            t += &format!("\nBattery {b}%{}", fmt_volts(s.voltage_mv));
+        let mut t = self.device_name().to_string();
+        if let Some(b) = self.battery_text() {
+            t += &format!("\nBattery {b}");
         }
         if let Some((x, _)) = s.dpi {
             t += &format!("\n{x} DPI");
@@ -240,7 +311,6 @@ impl App {
         }
         t
     }
-
     fn nid(&self) -> NOTIFYICONDATAW {
         NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -255,7 +325,7 @@ impl App {
             return;
         }
         if self.icon.is_null() {
-            self.icon = make_battery_icon(self.state.battery, self.state.connected && !self.state.asleep);
+            self.icon = make_battery_icon(self.icon_level(), self.state.connected && !self.state.asleep);
         }
         let mut nid = self.nid();
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
@@ -271,7 +341,7 @@ impl App {
             return;
         }
         let old = self.icon;
-        self.icon = make_battery_icon(self.state.battery, self.state.connected && !self.state.asleep);
+        self.icon = make_battery_icon(self.icon_level(), self.state.connected && !self.state.asleep);
         self.push_icon();
         if !old.is_null() {
             unsafe { DestroyIcon(old) };
@@ -280,18 +350,27 @@ impl App {
 
     /// Battery at or below the warning level: the gauge always wins then.
     fn battery_low(&self) -> bool {
+        if !self.state.connected || self.state.asleep || self.state.battery.is_none() {
+            return false;
+        }
+        if self.liion() {
+            return !self.liion_high();
+        }
         let t = self.state.lowbat.map_or(15, razer::raw_to_percent);
-        self.state.connected && !self.state.asleep && self.state.battery.is_some_and(|b| b <= t)
+        self.state.battery.is_some_and(|b| b <= t)
     }
 
     fn shown_icon(&self) -> HICON {
+        // Mice without a battery have no gauge to show.
+        let no_battery = self.state.device.is_some_and(|d| !d.battery);
         let logo = !self.logo_icon.is_null()
             && !self.battery_low()
-            && match self.config.tray_icon {
-                TrayIcon::Battery => false,
-                TrayIcon::Logo => true,
-                TrayIcon::Alternate => self.logo_phase,
-            };
+            && (no_battery
+                || match self.config.tray_icon {
+                    TrayIcon::Battery => false,
+                    TrayIcon::Logo => true,
+                    TrayIcon::Alternate => self.logo_phase,
+                });
         if logo {
             self.logo_icon
         } else {
@@ -360,33 +439,41 @@ impl App {
         }
         let Some(b) = self.state.battery else { return };
         let prev = self.prev_battery.replace(b);
+        let name = self.device_name();
+        if self.state.charging == Some(true) {
+            self.warned = false; // being charged: nothing to warn about
+            return;
+        }
+
+        if self.liion() {
+            // Li-ion: High/Low from voltage. Smart cells drop their voltage
+            // on purpose when nearly empty; the reading falls off a cliff.
+            let stepped = self.config.liion_step && prev.is_some_and(|p| p >= 50 && b + STEP_DROP <= p);
+            if self.liion_high() && !stepped {
+                self.warned = false;
+            } else if !self.warned {
+                self.warned = true;
+                self.notify(
+                    "Mouse battery low",
+                    &format!("The Li-ion battery in your {name} is nearly empty. Swap or charge it soon."),
+                );
+            }
+            return;
+        }
+
         if b > 80 {
             self.warned = false; // fresh batteries
         }
-
-        // Li-ion cells that drop their voltage on purpose when nearly empty:
-        // the reading falls off a cliff instead of drifting down.
-        if self.config.liion && self.config.liion_step && !self.warned {
-            if let Some(p) = prev {
-                if p >= 50 && b + STEP_DROP <= p {
-                    self.warned = true;
-                    self.notify(
-                        "Mouse battery low",
-                        "Your Li-ion AA just signaled it's nearly empty. Swap or charge it soon.",
-                    );
-                    return;
-                }
-            }
-        }
-
         // Same threshold as the mouse's own red blink (default 15% until read).
         let t = self.state.lowbat.map_or(15, razer::raw_to_percent);
         if b <= t && !self.warned {
             self.warned = true;
-            self.notify(
-                "Mouse battery low",
-                &format!("Viper V3 HyperSpeed is at {b}%. Time for fresh AAs."),
-            );
+            let action = if self.state.device.is_some_and(|d| d.charging) && self.state.battery_type.is_none() {
+                "Time to charge it."
+            } else {
+                "Time for fresh batteries."
+            };
+            self.notify("Mouse battery low", &format!("Your {name} is at {b}%. {action}"));
         }
     }
 
@@ -402,15 +489,19 @@ impl App {
                 AppendMenuW(m, MF_STRING | MF_GRAYED, 0, w(text).as_ptr());
             };
             if !s.connected {
-                info(menu, "Receiver not found");
+                info(menu, "No supported mouse found");
             } else if s.asleep {
-                info(menu, "Mouse asleep (move it to wake)");
+                info(menu, &format!("{} asleep (move it to wake)", self.device_name()));
             } else {
-                if let Some(b) = s.battery {
-                    info(menu, &format!("Battery: {b}%{}", fmt_volts(s.voltage_mv)));
+                info(menu, self.device_name());
+                if let Some(b) = self.battery_text() {
+                    info(menu, &format!("Battery: {b}"));
                 }
-                if let (Some((x, _)), Some(p)) = (s.dpi, s.poll) {
-                    info(menu, &format!("{x} DPI · {p} Hz"));
+                match (s.dpi, s.poll) {
+                    (Some((x, _)), Some(p)) => info(menu, &format!("{x} DPI · {p} Hz")),
+                    (Some((x, _)), None) => info(menu, &format!("{x} DPI")),
+                    (None, Some(p)) => info(menu, &format!("{p} Hz")),
+                    (None, None) => {}
                 }
             }
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
@@ -419,8 +510,8 @@ impl App {
             let dis = if usable { 0 } else { MF_GRAYED };
 
             // DPI stages
-            let sub = CreatePopupMenu();
             if let Some(st) = &s.stages {
+                let sub = CreatePopupMenu();
                 for (i, (x, _)) in st.stages.iter().enumerate() {
                     AppendMenuW(
                         sub,
@@ -439,84 +530,120 @@ impl App {
                         MF_BYCOMMAND,
                     );
                 }
+                AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("DPI stage").as_ptr());
             }
-            AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("DPI stage").as_ptr());
 
-            // Polling rate
-            let sub = CreatePopupMenu();
-            for (i, hz) in razer::POLL_RATES.iter().enumerate() {
-                AppendMenuW(sub, MF_STRING | dis, ID_POLL + i, w(&format!("{hz} Hz")).as_ptr());
+            // Polling rate (this mouse's rates)
+            let rates = self.poll_rates();
+            if s.poll.is_some() && !rates.is_empty() {
+                let sub = CreatePopupMenu();
+                for (i, hz) in rates.iter().enumerate() {
+                    AppendMenuW(sub, MF_STRING | dis, ID_POLL + i, w(&format!("{hz} Hz")).as_ptr());
+                }
+                if let Some(i) = s.poll.and_then(|p| rates.iter().position(|&r| r == p)) {
+                    CheckMenuRadioItem(
+                        sub,
+                        ID_POLL as u32,
+                        (ID_POLL + rates.len() - 1) as u32,
+                        (ID_POLL + i) as u32,
+                        MF_BYCOMMAND,
+                    );
+                }
+                AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("Polling rate").as_ptr());
             }
-            if let Some(i) = s.poll.and_then(|p| razer::POLL_RATES.iter().position(|&r| r == p)) {
-                CheckMenuRadioItem(
-                    sub,
-                    ID_POLL as u32,
-                    (ID_POLL + razer::POLL_RATES.len() - 1) as u32,
-                    (ID_POLL + i) as u32,
-                    MF_BYCOMMAND,
-                );
+
+            // Scroll wheel
+            if s.free_spin.is_some() || s.scroll_accel.is_some() || s.smart_reel.is_some() {
+                let sub = CreatePopupMenu();
+                let check = |v: Option<bool>| if v == Some(true) { MF_CHECKED } else { 0 };
+                if s.free_spin.is_some() {
+                    AppendMenuW(
+                        sub,
+                        MF_STRING | dis | check(s.free_spin),
+                        ID_FREESPIN,
+                        w("Free spin").as_ptr(),
+                    );
+                }
+                if s.scroll_accel.is_some() {
+                    let f = MF_STRING | dis | check(s.scroll_accel);
+                    AppendMenuW(sub, f, ID_SCROLL_ACCEL, w("Scroll acceleration").as_ptr());
+                }
+                if s.smart_reel.is_some() {
+                    AppendMenuW(
+                        sub,
+                        MF_STRING | dis | check(s.smart_reel),
+                        ID_SMART_REEL,
+                        w("Smart Reel").as_ptr(),
+                    );
+                }
+                AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("Scroll wheel").as_ptr());
             }
-            AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("Polling rate").as_ptr());
 
             // Sleep timer
-            let sub = CreatePopupMenu();
-            for (i, secs) in IDLE_CHOICES.iter().enumerate() {
+            if s.idle.is_some() {
+                let sub = CreatePopupMenu();
+                for (i, secs) in IDLE_CHOICES.iter().enumerate() {
+                    AppendMenuW(
+                        sub,
+                        MF_STRING | dis,
+                        ID_IDLE + i,
+                        w(&format!("{} min", secs / 60)).as_ptr(),
+                    );
+                }
+                if let Some(i) = s.idle.and_then(|v| IDLE_CHOICES.iter().position(|&c| c == v)) {
+                    CheckMenuRadioItem(
+                        sub,
+                        ID_IDLE as u32,
+                        (ID_IDLE + IDLE_CHOICES.len() - 1) as u32,
+                        (ID_IDLE + i) as u32,
+                        MF_BYCOMMAND,
+                    );
+                }
+                AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("Sleep after").as_ptr());
+            }
+
+            // Battery type (discharge curve, AA mice). Li-ion is Raisin's own
+            // profile: alkaline curve + low threshold, in the settings file.
+            if s.battery_type.is_some() {
+                let sub = CreatePopupMenu();
+                for (i, t) in BatteryType::ALL.iter().enumerate() {
+                    AppendMenuW(sub, MF_STRING | dis, ID_BATTYPE + i, w(t.name()).as_ptr());
+                }
+                AppendMenuW(sub, MF_STRING | dis, ID_LIION, w("Li-ion 1.5 V rechargeable").as_ptr());
+                let liion_active = self.battery_choice() == Some(3);
+                if let Some(i) = self.battery_choice() {
+                    CheckMenuRadioItem(
+                        sub,
+                        ID_BATTYPE as u32,
+                        ID_LIION as u32,
+                        (ID_BATTYPE + i) as u32,
+                        MF_BYCOMMAND,
+                    );
+                }
+                AppendMenuW(sub, MF_SEPARATOR, 0, null());
+                let step_flags = if !liion_active || !usable { MF_GRAYED } else { 0 }
+                    | if self.config.liion_step { MF_CHECKED } else { 0 };
                 AppendMenuW(
                     sub,
-                    MF_STRING | dis,
-                    ID_IDLE + i,
-                    w(&format!("{} min", secs / 60)).as_ptr(),
+                    MF_STRING | step_flags,
+                    ID_LIION_STEP,
+                    w("Li-ion cells drop voltage when low").as_ptr(),
                 );
+                AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("Battery type").as_ptr());
             }
-            if let Some(i) = s.idle.and_then(|v| IDLE_CHOICES.iter().position(|&c| c == v)) {
-                CheckMenuRadioItem(
-                    sub,
-                    ID_IDLE as u32,
-                    (ID_IDLE + IDLE_CHOICES.len() - 1) as u32,
-                    (ID_IDLE + i) as u32,
-                    MF_BYCOMMAND,
-                );
-            }
-            AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("Sleep after").as_ptr());
-
-            // Battery type (discharge curve). Li-ion is Raisin's own profile:
-            // alkaline curve + low threshold, remembered in the settings file.
-            let sub = CreatePopupMenu();
-            for (i, t) in BatteryType::ALL.iter().enumerate() {
-                AppendMenuW(sub, MF_STRING | dis, ID_BATTYPE + i, w(t.name()).as_ptr());
-            }
-            AppendMenuW(sub, MF_STRING | dis, ID_LIION, w("Li-ion 1.5 V rechargeable").as_ptr());
-            let liion_active = self.battery_choice() == Some(3);
-            if let Some(i) = self.battery_choice() {
-                CheckMenuRadioItem(
-                    sub,
-                    ID_BATTYPE as u32,
-                    ID_LIION as u32,
-                    (ID_BATTYPE + i) as u32,
-                    MF_BYCOMMAND,
-                );
-            }
-            AppendMenuW(sub, MF_SEPARATOR, 0, null());
-            let step_flags = if !liion_active || !usable { MF_GRAYED } else { 0 }
-                | if self.config.liion_step { MF_CHECKED } else { 0 };
-            AppendMenuW(
-                sub,
-                MF_STRING | step_flags,
-                ID_LIION_STEP,
-                w("Li-ion cells drop voltage when low").as_ptr(),
-            );
-            AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("Battery type").as_ptr());
 
             // Low-battery blink threshold
-            let sub = CreatePopupMenu();
-            for (i, p) in razer::LOW_BATTERY_CHOICES.iter().enumerate() {
-                AppendMenuW(sub, MF_STRING | dis, ID_LOWBAT + i, w(&format!("{p}%")).as_ptr());
+            if s.lowbat.is_some() {
+                let sub = CreatePopupMenu();
+                for (i, p) in razer::LOW_BATTERY_CHOICES.iter().enumerate() {
+                    AppendMenuW(sub, MF_STRING | dis, ID_LOWBAT + i, w(&format!("{p}%")).as_ptr());
+                }
+                if let Some(i) = self.lowbat_index() {
+                    let last = ID_LOWBAT + razer::LOW_BATTERY_CHOICES.len() - 1;
+                    CheckMenuRadioItem(sub, ID_LOWBAT as u32, last as u32, (ID_LOWBAT + i) as u32, MF_BYCOMMAND);
+                }
+                AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("Low battery warning").as_ptr());
             }
-            if let Some(i) = self.lowbat_index() {
-                let last = ID_LOWBAT + razer::LOW_BATTERY_CHOICES.len() - 1;
-                CheckMenuRadioItem(sub, ID_LOWBAT as u32, last as u32, (ID_LOWBAT + i) as u32, MF_BYCOMMAND);
-            }
-            AppendMenuW(menu, MF_POPUP | dis, sub as usize, w("Low battery warning").as_ptr());
 
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
             // Tray icon (not a mouse setting, so always available)
@@ -562,8 +689,21 @@ impl App {
     fn command(&mut self, cmd: usize) {
         match cmd {
             c if (ID_STAGE..ID_STAGE + 5).contains(&c) => self.act(|a| a.select_stage(c - ID_STAGE)),
-            c if (ID_POLL..ID_POLL + razer::POLL_RATES.len()).contains(&c) => {
-                self.act(|a| a.set_poll(razer::POLL_RATES[c - ID_POLL]))
+            c if (ID_POLL..ID_POLL + self.poll_rates().len()).contains(&c) => {
+                let hz = self.poll_rates()[c - ID_POLL];
+                self.act(|a| a.set_poll(hz))
+            }
+            ID_FREESPIN => {
+                let on = self.state.free_spin != Some(true);
+                self.act(|a| a.need_mouse()?.set_free_spin(on))
+            }
+            ID_SCROLL_ACCEL => {
+                let on = self.state.scroll_accel != Some(true);
+                self.act(|a| a.need_mouse()?.set_scroll_acceleration(on))
+            }
+            ID_SMART_REEL => {
+                let on = self.state.smart_reel != Some(true);
+                self.act(|a| a.need_mouse()?.set_smart_reel(on))
             }
             c if (ID_IDLE..ID_IDLE + IDLE_CHOICES.len()).contains(&c) => {
                 self.act(|a| a.set_idle(IDLE_CHOICES[c - ID_IDLE]))

@@ -34,9 +34,20 @@ Raisin's point is to be small. Please keep the tray process free of heavy depend
 - Prefer read-only exploration (`raisin scan`). If you must test an unknown write, change one value at a time, read it back, and restore the original.
 - Update `docs/protocol.md`.
 
-## Adding a mouse
+## Adding or updating mice
 
-Open a [device request](https://github.com/bladestech/Raisin/issues/new?template=device_request.yml) with the output of `raisin probe`, or send a pull request with the model's USB ID and details, plus what you tested.
+The device table is generated from OpenRazer, so new models usually only need a regeneration:
+
+```powershell
+git clone --depth 1 https://github.com/openrazer/openrazer ..\openrazer
+python -I tools\openrazer_devices.py ..\openrazer src\devices_table.rs docs\devices.md
+```
+
+The tool only reads OpenRazer's files; it doesn't run any of their code. Review the diff of `src/devices_table.rs` before committing.
+
+**Confirming a model works:** if you've tested Raisin on a mouse, add its USB product ID to `TESTED` in `src/devices.rs` and in `tools/openrazer_devices.py`, regenerate, and mention in the pull request what you checked (DPI, polling rate, battery and so on).
+
+**A mouse that isn't in OpenRazer:** open a [device request](https://github.com/bladestech/Raisin/issues/new?template=device_request.yml) with the output of `raisin probe`.
 
 ## Releases
 
