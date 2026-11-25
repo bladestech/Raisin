@@ -3,6 +3,7 @@
 mod config;
 mod devices;
 mod hid;
+mod power;
 mod razer;
 mod tray;
 
@@ -19,6 +20,9 @@ Raisin: lightweight Razer mouse configurator
   raisin stage <n>         switch to stage n (1-based)
   raisin poll <hz>         polling rate (raisin info lists what your mouse supports)
   raisin sleep <seconds>   sleep timer, 60-900
+  raisin power <saver|balanced|max>
+                           power mode: saver = lowest rate + 1 min sleep;
+                           balanced = 1000 Hz + 5 min; max = fastest rate + 5 min
   raisin lowbat <5-30>     red low-battery blink threshold, percent
   raisin battery <alkaline|nimh|lithium|liion|liion-step>
                            battery type (AA mice). liion = alkaline curve + 5% blink;
@@ -147,6 +151,7 @@ fn cli(args: &[String]) -> i32 {
             | "stage"
             | "poll"
             | "sleep"
+            | "power"
             | "lowbat"
             | "battery"
             | "scroll"
@@ -265,6 +270,31 @@ fn cli(args: &[String]) -> i32 {
                 println!("battery:      {}", battery_line(&m, &cfg)?);
                 println!("lowbat:       {}", fmt_lowbat(m.low_battery_threshold()?));
             }
+            "power" => {
+                let Some(mode) = arg.and_then(power::Mode::parse) else {
+                    return usage();
+                };
+                let rates = m.info.poll_rates;
+                if rates.is_empty() {
+                    eprintln!("{} has no polling rate setting", m.info.name);
+                    return Ok(());
+                }
+                if let Some(hz) = mode.poll(rates) {
+                    m.set_poll_rate(hz)?;
+                }
+                let idle = opt(m.idle_time())?;
+                if idle.is_some() {
+                    m.set_idle_time(mode.idle())?;
+                }
+                let mut cfg = Config::load();
+                cfg.power = Some(mode);
+                cfg.save();
+                println!("power: {}", mode.label());
+                println!("poll:  {} Hz", m.poll_rate()?);
+                if idle.is_some() {
+                    println!("sleep: {} s", m.idle_time()?);
+                }
+            }
             "sleep" => {
                 let Some(v) = num(arg) else {
                     return usage();
@@ -380,8 +410,13 @@ fn info(m: &Mouse) -> razer::Result<()> {
     if let Some(p) = opt(m.poll_rate())? {
         println!("poll:     {p} Hz (supports {:?})", d.poll_rates);
     }
-    if let Some(s) = opt(m.idle_time())? {
+    let idle = opt(m.idle_time())?;
+    if let Some(s) = idle {
         println!("sleep:    {s} s");
+    }
+    if let Some(p) = opt(m.poll_rate())?.filter(|_| !d.poll_rates.is_empty()) {
+        let mode = power::current(d.poll_rates, p, idle, cfg.power);
+        println!("power:    {}", mode.map_or("custom", power::Mode::label));
     }
     if let Some(l) = opt(m.low_battery_threshold())? {
         println!("lowbat:   {}", fmt_lowbat(l));

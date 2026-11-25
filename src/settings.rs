@@ -31,6 +31,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use super::{autostart_enabled, set_autostart, w, with_app, App, IDLE_CHOICES};
 use crate::config::TrayIcon;
+use crate::power::Mode;
 use crate::razer;
 
 type SysPcwstr = windows_sys::core::PCWSTR;
@@ -64,6 +65,9 @@ const CTRL_W: f32 = 252.0;
 const BATTERY_LABELS: [&str; 4] = ["Alkaline", "NiMH", "Lithium", "Li-ion"];
 const LOWBAT_LABELS: [&str; 6] = ["5%", "10%", "15%", "20%", "25%", "30%"];
 const IDLE_LABELS: [&str; 5] = ["1 min", "2 min", "5 min", "10 min", "15 min"];
+/// Info bubble width.
+const TIP_W: f32 = 264.0;
+const TIP_PAD: f32 = 10.0;
 
 // ---------- data shown in the window ----------
 
@@ -100,6 +104,8 @@ struct View {
     active: usize,
     poll_rates: Vec<u16>,
     poll: Option<usize>,
+    /// Index into power::Mode::ALL of the mode the settings match.
+    power: Option<usize>,
     has_idle: bool,
     idle: Option<usize>,
     free_spin: Option<bool>,
@@ -148,6 +154,7 @@ impl View {
                 Vec::new()
             },
             poll: s.poll.and_then(|p| app.poll_rates().iter().position(|&r| r == p)),
+            power: app.power_mode().and_then(|p| Mode::ALL.iter().position(|&m| m == p)),
             has_idle: s.idle.is_some(),
             idle: s.idle.and_then(|v| IDLE_CHOICES.iter().position(|&c| c == v)),
             free_spin: s.free_spin,
@@ -190,6 +197,7 @@ enum Hit {
     AddStage,
     Apply,
     Revert,
+    Power(usize),
     Poll(usize),
     Idle(usize),
     FreeSpin,
@@ -198,6 +206,75 @@ enum Hit {
     TrayIcon(usize),
     Autostart,
     CopySerial,
+    /// Hovering an (i) shows its explanation.
+    Info(Tip),
+}
+
+/// Explanations behind the (i) icons.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Tip {
+    BatteryType,
+    WarnAt,
+    LiionStep,
+    Stages,
+    SingleDpi,
+    FreeSpin,
+    ScrollAccel,
+    SmartReel,
+    Power,
+    Poll,
+    Sleep,
+    TrayIcon,
+}
+
+impl Tip {
+    fn text(self) -> &'static str {
+        match self {
+            Tip::BatteryType => {
+                "Tells the mouse which discharge curve to read its battery level with. \
+                 Li-ion is for regulated 1.5 V rechargeable AAs: they hold their voltage until \
+                 nearly empty, so the percentage can't be trusted and Raisin shows High or Low instead."
+            }
+            Tip::WarnAt => {
+                "The battery level where the mouse starts blinking red, with a Windows \
+                 notification from Raisin. The mouse only accepts 5 to 30%."
+            }
+            Tip::LiionStep => {
+                "Turn this on if your cells drop their voltage on purpose when nearly empty \
+                 (many smart Li-ion AAs do). The warning moves to 30%, so the drop sets it off."
+            }
+            Tip::Stages => {
+                "The sensitivity steps the DPI button under the wheel cycles through. \
+                 Click a stage to switch to it. Use + and - or scroll over a value to change it, \
+                 then press Apply."
+            }
+            Tip::SingleDpi => {
+                "Mouse sensitivity in dots per inch: higher moves the pointer further. \
+                 Use + and - or scroll over the value, then press Apply."
+            }
+            Tip::FreeSpin => "Unlocks the wheel so it spins freely, for flying through long pages.",
+            Tip::ScrollAccel => "Scrolls further the faster you spin the wheel.",
+            Tip::SmartReel => "Switches between tactile and free-spin by itself, depending on how fast you scroll.",
+            Tip::Power => {
+                "Power Saver: the lowest polling rate and a 1-minute sleep timer, for the \
+                 longest battery life.\nBalanced: 1000 Hz and a 5-minute sleep timer.\n\
+                 Max: the fastest polling rate this mouse supports and a 5-minute sleep timer."
+            }
+            Tip::Poll => {
+                "How many times a second the mouse reports to the PC. Higher feels smoother \
+                 but uses more battery and CPU. Above 1000 Hz mostly helps on high refresh \
+                 rate displays."
+            }
+            Tip::Sleep => {
+                "How long the mouse waits without being used before it sleeps to save power. \
+                 Move it or click to wake it."
+            }
+            Tip::TrayIcon => {
+                "What the tray icon shows: the battery gauge, the Raisin logo, or the two \
+                 taking turns. The gauge always shows when the battery is low."
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -268,6 +345,8 @@ struct Theme {
     on_accent: C,
     /// Solid background when acrylic isn't available (Windows 10).
     fallback_bg: C,
+    /// Info bubble.
+    tip_bg: C,
 }
 
 fn reg_dword(path: &str, name: &str) -> Option<u32> {
@@ -323,6 +402,7 @@ fn theme(dark: bool) -> Theme {
             accent: accent.mix(C(1.0, 1.0, 1.0, 1.0), 0.35),
             on_accent: C(0.0, 0.0, 0.0, 0.9),
             fallback_bg: C(0.13, 0.13, 0.13, 1.0),
+            tip_bg: C(0.17, 0.17, 0.17, 0.98),
         }
     } else {
         Theme {
@@ -337,6 +417,7 @@ fn theme(dark: bool) -> Theme {
             accent: accent.mix(C(0.0, 0.0, 0.0, 1.0), 0.1),
             on_accent: C(1.0, 1.0, 1.0, 1.0),
             fallback_bg: C(0.95, 0.95, 0.95, 1.0),
+            tip_bg: C(0.99, 0.99, 0.99, 0.98),
         }
     }
 }
@@ -365,6 +446,9 @@ struct Fonts {
     center: IDWriteTextFormat,
     value: IDWriteTextFormat,
     glyph: IDWriteTextFormat,
+    info: IDWriteTextFormat,
+    /// Wrapping, top-aligned text for info bubbles.
+    tip: IDWriteTextFormat,
 }
 
 struct Gfx {
@@ -462,6 +546,13 @@ impl Gfx {
                 center: text_format(&dw, text, 12.0, DWRITE_FONT_WEIGHT_NORMAL, mid)?,
                 value: text_format(&dw, text, 14.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, mid)?,
                 glyph: text_format(&dw, wstr!("Segoe Fluent Icons"), 10.0, DWRITE_FONT_WEIGHT_NORMAL, mid)?,
+                info: text_format(&dw, wstr!("Segoe Fluent Icons"), 12.0, DWRITE_FONT_WEIGHT_NORMAL, mid)?,
+                tip: {
+                    let f = text_format(&dw, text, 12.0, DWRITE_FONT_WEIGHT_NORMAL, lead)?;
+                    f.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
+                    f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
+                    f
+                },
             };
             let logo = rt
                 .CreateBitmap(
@@ -534,17 +625,22 @@ impl Gfx {
 
     /// Width of `s` in DIPs.
     fn measure(&self, s: &str, f: &IDWriteTextFormat) -> f32 {
+        self.metrics(s, f, 1000.0)
+            .map_or(0.0, |m| m.widthIncludingTrailingWhitespace)
+    }
+
+    /// Height of `s` wrapped to `width` DIPs.
+    fn wrapped_height(&self, s: &str, f: &IDWriteTextFormat, width: f32) -> f32 {
+        self.metrics(s, f, width).map_or(0.0, |m| m.height)
+    }
+
+    fn metrics(&self, s: &str, f: &IDWriteTextFormat, width: f32) -> Option<DWRITE_TEXT_METRICS> {
         let u: Vec<u16> = s.encode_utf16().collect();
         unsafe {
-            let Ok(layout) = self.dw.CreateTextLayout(&u, f, 1000.0, 100.0) else {
-                return 0.0;
-            };
+            let layout = self.dw.CreateTextLayout(&u, f, width, 1000.0).ok()?;
             let mut m: DWRITE_TEXT_METRICS = zeroed();
-            if layout.GetMetrics(&mut m).is_ok() {
-                m.widthIncludingTrailingWhitespace
-            } else {
-                0.0
-            }
+            layout.GetMetrics(&mut m).ok()?;
+            Some(m)
         }
     }
 }
@@ -786,6 +882,19 @@ fn bump(v: u16, up: bool, max: u16) -> u16 {
     n.clamp(razer::DPI_MIN, max.max(razer::DPI_MIN))
 }
 
+/// Top-left of a `w`×`h` info bubble for an (i) at `anchor`: centered under
+/// it, kept inside the window, and flipped above when it won't fit below.
+fn bubble_pos(anchor: Rect, w: f32, h: f32, window_h: f32) -> (f32, f32) {
+    let x = (anchor.x + anchor.w / 2.0 - w / 2.0).clamp(PAD / 2.0, WIDTH - PAD / 2.0 - w);
+    let below = anchor.y + anchor.h + 4.0;
+    let y = if below + h <= window_h - 4.0 {
+        below
+    } else {
+        (anchor.y - 4.0 - h).max(4.0)
+    };
+    (x, y)
+}
+
 /// Short labels when many rates must fit in the segmented control.
 fn poll_label(hz: u16, many: bool) -> String {
     match (many, hz) {
@@ -845,7 +954,7 @@ impl Ui {
             let card = self.card(g, t, y, rows);
             let mut ry = card.y + CARD_PAD;
             if v.battery_choice.is_some() {
-                self.label(g, t, "Battery type", ry, usable);
+                self.label_info(g, t, hits, "Battery type", ry, usable, Tip::BatteryType);
                 self.segmented(
                     g,
                     t,
@@ -860,13 +969,14 @@ impl Ui {
                 ry += ROW_H + ROW_GAP;
             }
             if v.has_lowbat {
-                self.label(g, t, "Warn at", ry, usable);
+                self.label_info(g, t, hits, "Warn at", ry, usable, Tip::WarnAt);
                 self.segmented(g, t, hits, ry, &LOWBAT_LABELS, v.lowbat, usable, Hit::Lowbat, hover);
                 ry += ROW_H + ROW_GAP;
             }
             if v.battery_choice.is_some() {
                 let liion = v.battery_choice == Some(3);
                 let text = "Li-ion cells drop voltage when low";
+                self.info_after(g, t, hits, text, &g.fonts.body, ry, Tip::LiionStep);
                 self.toggle_row(g, t, hits, ry, text, v.liion_step, usable && liion, Hit::Step, hover);
             }
             y = card.y + card.h + CARD_GAP;
@@ -878,18 +988,24 @@ impl Ui {
         }
 
         // --- Scroll wheel ---
-        let scroll: Vec<(&str, Option<bool>, Hit)> = [
-            ("Free-spin scrolling", v.free_spin, Hit::FreeSpin),
-            ("Scroll acceleration", v.scroll_accel, Hit::ScrollAccel),
-            ("Smart Reel", v.smart_reel, Hit::SmartReel),
+        let scroll: Vec<(&str, Option<bool>, Hit, Tip)> = [
+            ("Free-spin scrolling", v.free_spin, Hit::FreeSpin, Tip::FreeSpin),
+            (
+                "Scroll acceleration",
+                v.scroll_accel,
+                Hit::ScrollAccel,
+                Tip::ScrollAccel,
+            ),
+            ("Smart Reel", v.smart_reel, Hit::SmartReel, Tip::SmartReel),
         ]
         .into_iter()
-        .filter(|(_, s, _)| s.is_some())
+        .filter(|(_, s, _, _)| s.is_some())
         .collect();
         if v.connected && !scroll.is_empty() {
             let card = self.card(g, t, y, scroll.len());
             let mut ry = card.y + CARD_PAD;
-            for (text, on, hit) in scroll {
+            for (text, on, hit, tip) in scroll {
+                self.info_after(g, t, hits, text, &g.fonts.body, ry, tip);
                 self.toggle_row(g, t, hits, ry, text, on == Some(true), usable, hit, hover);
                 ry += ROW_H + ROW_GAP;
             }
@@ -899,11 +1015,15 @@ impl Ui {
         // --- Performance & app ---
         let has_poll = v.connected && !v.poll_rates.is_empty();
         let has_idle = v.connected && v.has_idle;
-        let rows = has_poll as usize + has_idle as usize + 2;
+        let rows = has_poll as usize * 2 + has_idle as usize + 2;
         let card = self.card(g, t, y, rows);
         let mut ry = card.y + CARD_PAD;
         if has_poll {
-            self.label(g, t, "Polling rate", ry, usable);
+            self.label_info(g, t, hits, "Power mode", ry, usable, Tip::Power);
+            let labels = Mode::ALL.map(Mode::label);
+            self.segmented(g, t, hits, ry, &labels, v.power, usable, Hit::Power, hover);
+            ry += ROW_H + ROW_GAP;
+            self.label_info(g, t, hits, "Polling rate", ry, usable, Tip::Poll);
             let many = v.poll_rates.len() > 4;
             let labels: Vec<String> = v.poll_rates.iter().map(|&hz| poll_label(hz, many)).collect();
             let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
@@ -911,12 +1031,12 @@ impl Ui {
             ry += ROW_H + ROW_GAP;
         }
         if has_idle {
-            self.label(g, t, "Sleep after", ry, usable);
+            self.label_info(g, t, hits, "Sleep after", ry, usable, Tip::Sleep);
             self.segmented(g, t, hits, ry, &IDLE_LABELS, v.idle, usable, Hit::Idle, hover);
             ry += ROW_H + ROW_GAP;
         }
         // Not mouse settings: always enabled.
-        self.label(g, t, "Tray icon", ry, true);
+        self.label_info(g, t, hits, "Tray icon", ry, true, Tip::TrayIcon);
         let tray_labels = TrayIcon::ALL.map(|t| t.label());
         self.segmented(
             g,
@@ -947,7 +1067,65 @@ impl Ui {
         if v.connected {
             y = self.about(g, t, hits, y);
         }
-        y + PAD - CARD_GAP
+        let height = y + PAD - CARD_GAP;
+
+        // Info bubble on top of everything.
+        if let Some(Hit::Info(tip)) = hover {
+            if let Some(&(anchor, _)) = hits.iter().find(|(_, h)| *h == Hit::Info(tip)) {
+                self.bubble(g, t, anchor, tip.text(), height);
+            }
+        }
+        height
+    }
+
+    /// Row label followed by an (i).
+    #[allow(clippy::too_many_arguments)]
+    fn label_info(&self, g: &Gfx, t: &Theme, hits: &mut Vec<(Rect, Hit)>, s: &str, y: f32, enabled: bool, tip: Tip) {
+        self.label(g, t, s, y, enabled);
+        self.info_after(g, t, hits, s, &g.fonts.body, y, tip);
+    }
+
+    /// An (i) just after `s` drawn at the row's text position. Its hit goes
+    /// in first, so it wins over a toggle row underneath.
+    #[allow(clippy::too_many_arguments)]
+    fn info_after(
+        &self,
+        g: &Gfx,
+        t: &Theme,
+        hits: &mut Vec<(Rect, Hit)>,
+        s: &str,
+        f: &IDWriteTextFormat,
+        y: f32,
+        tip: Tip,
+    ) {
+        let x = PAD + 16.0 + g.measure(s, f) + 3.0;
+        self.info(g, t, hits, x, y + (ROW_H - 20.0) / 2.0, tip);
+    }
+
+    fn info(&self, g: &Gfx, t: &Theme, hits: &mut Vec<(Rect, Hit)>, x: f32, y: f32, tip: Tip) {
+        let r = Rect::new(x, y, 20.0, 20.0);
+        let hovered = self.hover == Some(Hit::Info(tip));
+        g.text("\u{E946}", r, &g.fonts.info, if hovered { t.accent } else { t.text3 });
+        hits.push((r, Hit::Info(tip)));
+    }
+
+    /// Info bubble under (or, near the bottom, over) `anchor`.
+    fn bubble(&self, g: &Gfx, t: &Theme, anchor: Rect, text: &str, window_h: f32) {
+        // Non-breaking hyphens: keep "Li-ion" and "1-minute" on one line.
+        let text = &text.replace('-', "\u{2011}");
+        let text_h = g.wrapped_height(text, &g.fonts.tip, TIP_W - 2.0 * TIP_PAD);
+        let h = text_h + 2.0 * TIP_PAD;
+        let (x, y) = bubble_pos(anchor, TIP_W, h, window_h);
+        let r = Rect::new(x, y, TIP_W, h);
+        // Soft shadow, then the bubble.
+        g.fill(
+            Rect::new(r.x - 1.0, r.y + 1.0, r.w + 2.0, r.h + 3.0),
+            9.0,
+            C(0.0, 0.0, 0.0, 0.18),
+        );
+        g.fill(r, 8.0, t.tip_bg);
+        g.stroke(r, 8.0, 1.0, t.ctrl_stroke);
+        g.text(text, r.inset(TIP_PAD), &g.fonts.tip, t.text);
     }
 
     fn header(&self, g: &Gfx, t: &Theme) {
@@ -1169,6 +1347,8 @@ impl Ui {
             &g.fonts.body_bold,
             if usable { t.text } else { t.text3 },
         );
+        let tip = if v.has_stages { Tip::Stages } else { Tip::SingleDpi };
+        self.info_after(g, t, hits, &title, &g.fonts.body_bold, ry, tip);
         let dirty = self.pending.as_ref().is_some_and(|p| *p != v.dpi_values());
         if dirty && usable {
             let apply = Rect::new(cx + inner_w - 76.0, ry + 1.0, 76.0, 28.0);
@@ -1366,6 +1546,8 @@ fn activate(hit: Hit) {
             }
         }
         Hit::Idle(i) => drop(with_app(|a| a.act(|a| a.set_idle(IDLE_CHOICES[i])))),
+        Hit::Power(i) => drop(with_app(|a| a.act(|a| a.set_power(Mode::ALL[i])))),
+        Hit::Info(_) => {}
         Hit::FreeSpin => {
             let on = toggle(v.free_spin);
             with_app(|a| a.act(|a| a.need_mouse()?.set_free_spin(on)));
@@ -1528,7 +1710,8 @@ unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) ->
             0
         }
         WM_SETCURSOR if (lp & 0xFFFF) as u32 == HTCLIENT => {
-            let over = with_ui(|u| u.hover.is_some()).unwrap_or(false);
+            // Hand over anything clickable; (i) icons only show a bubble.
+            let over = with_ui(|u| matches!(u.hover, Some(h) if !matches!(h, Hit::Info(_)))).unwrap_or(false);
             SetCursor(LoadCursorW(null_mut(), if over { IDC_HAND } else { IDC_ARROW }));
             1
         }
@@ -1631,6 +1814,44 @@ mod tests {
         assert_eq!(bump(razer::DPI_MIN, false, 30000), razer::DPI_MIN);
         assert_eq!(bump(30000, true, 30000), 30000);
         assert_eq!(bump(1800, true, 1800), 1800);
+    }
+
+    #[test]
+    fn bubbles_stay_inside_the_window() {
+        let w = TIP_W;
+        // Under the icon when there's room.
+        let (x, y) = bubble_pos(Rect::new(100.0, 100.0, 20.0, 20.0), w, 80.0, 600.0);
+        assert_eq!(y, 124.0);
+        assert!(x >= 0.0 && x + w <= WIDTH);
+        // Flipped above near the bottom.
+        let (_, y) = bubble_pos(Rect::new(100.0, 560.0, 20.0, 20.0), w, 80.0, 600.0);
+        assert_eq!(y, 560.0 - 4.0 - 80.0);
+        // Pulled in from the edges.
+        let (x, _) = bubble_pos(Rect::new(10.0, 100.0, 20.0, 20.0), w, 80.0, 600.0);
+        assert_eq!(x, PAD / 2.0);
+        let (x, _) = bubble_pos(Rect::new(WIDTH - 20.0, 100.0, 20.0, 20.0), w, 80.0, 600.0);
+        assert_eq!(x, WIDTH - PAD / 2.0 - w);
+    }
+
+    #[test]
+    fn every_tip_has_text() {
+        use Tip::*;
+        for t in [
+            BatteryType,
+            WarnAt,
+            LiionStep,
+            Stages,
+            SingleDpi,
+            FreeSpin,
+            ScrollAccel,
+            SmartReel,
+            Power,
+            Poll,
+            Sleep,
+            TrayIcon,
+        ] {
+            assert!(t.text().len() > 20, "{t:?}");
+        }
     }
 
     #[test]
