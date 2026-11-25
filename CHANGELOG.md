@@ -4,6 +4,8 @@ All notable changes to Raisin are listed here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-25
+
 ### Added
 
 - Power modes next to polling rate and sleep timer: Power Saver (lowest polling rate, 1-minute sleep), Balanced (1000 Hz, 5 minutes) and Max (the mouse's fastest rate, 5 minutes). In the settings window, the tray menu and `raisin power`; `raisin info` shows the current mode.
@@ -29,5 +31,6 @@ First release: a lightweight Razer Synapse replacement for Windows.
 - Start with Windows.
 - Command line: `info`, `dpi`, `stages`, `stage`, `poll`, `sleep`, `lowbat`, `battery`, `scroll`, `accel`, `smartreel`, `devices`, `probe`, `scan`.
 
-[Unreleased]: https://github.com/bladestech/Raisin/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/bladestech/Raisin/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/bladestech/Raisin/compare/v0.1.0...v0.1.5
 [0.1.0]: https://github.com/bladestech/Raisin/releases/tag/v0.1.0
