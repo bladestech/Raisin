@@ -14,8 +14,10 @@ use windows_sys::Win32::Devices::HumanInterfaceDevice::{
     HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetFeature, HidD_GetHidGuid, HidD_GetPreparsedData,
     HidD_SetFeature, HidP_GetCaps, HIDD_ATTRIBUTES, HIDP_CAPS, HIDP_STATUS_SUCCESS, PHIDP_PREPARSED_DATA,
 };
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, ReadFile, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+};
 
 pub struct DeviceInfo {
     pub path: Vec<u16>,
@@ -24,6 +26,7 @@ pub struct DeviceInfo {
     pub usage_page: u16,
     pub usage: u16,
     pub feature_len: u16,
+    pub input_len: u16,
 }
 
 impl DeviceInfo {
@@ -125,6 +128,7 @@ pub fn enumerate(vid: u16, pid: Option<u16>) -> Vec<DeviceInfo> {
                     usage_page: caps.UsagePage,
                     usage: caps.Usage,
                     feature_len: caps.FeatureReportByteLength,
+                    input_len: caps.InputReportByteLength,
                 });
             }
             CloseHandle(h);
@@ -137,6 +141,32 @@ pub fn enumerate(vid: u16, pid: Option<u16>) -> Vec<DeviceInfo> {
 impl Device {
     pub fn open(info: &DeviceInfo) -> Option<Device> {
         open_path(&info.path).map(|handle| Device { handle })
+    }
+
+    /// Open for reading input reports. Fails on collections Windows holds
+    /// exclusively (the mouse and keyboard ones), which is fine: events come
+    /// on the others.
+    pub fn open_input(info: &DeviceInfo) -> Option<Device> {
+        let h = unsafe {
+            CreateFileW(
+                info.path.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null(),
+                OPEN_EXISTING,
+                0,
+                null_mut(),
+            )
+        };
+        (h != INVALID_HANDLE_VALUE && !h.is_null()).then_some(Device { handle: h })
+    }
+
+    /// Block until the next input report; returns its length, or None once
+    /// the device is gone.
+    pub fn read(&self, buf: &mut [u8]) -> Option<usize> {
+        let mut n = 0u32;
+        let ok = unsafe { ReadFile(self.handle, buf.as_mut_ptr(), buf.len() as u32, &mut n, null_mut()) };
+        (ok != 0).then_some(n as usize)
     }
 
     /// `buf[0]` must be the report ID.

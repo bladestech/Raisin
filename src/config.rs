@@ -36,7 +36,7 @@ impl TrayIcon {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// Li-ion 1.5 V profile: alkaline curve + low threshold.
     pub liion: bool,
@@ -49,6 +49,26 @@ pub struct Config {
     pub auto_power: bool,
     /// Per-app power mode / DPI stage.
     pub rules: Vec<AppRule>,
+    /// Pop up the new DPI when the DPI button is pressed.
+    pub dpi_popup: bool,
+    /// Global keyboard shortcuts for DPI stage and power mode.
+    pub hotkeys: bool,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            liion: false,
+            liion_step: false,
+            tray_icon: TrayIcon::default(),
+            power: None,
+            auto_power: false,
+            rules: Vec::new(),
+            dpi_popup: true,
+            // Off until asked for: they could clash with other apps' keys.
+            hotkeys: false,
+        }
+    }
 }
 
 /// Regulated Li-ion AAs sit near 1.5 V until they're nearly empty, then
@@ -95,6 +115,8 @@ impl Config {
                 }
                 "power" => c.power = Mode::parse(v),
                 "auto_power" => c.auto_power = on,
+                "dpi_popup" => c.dpi_popup = on,
+                "hotkeys" => c.hotkeys = on,
                 "app" => {
                     if let Some(r) = AppRule::parse(v) {
                         if c.rules.len() < MAX_RULES && !c.rules.iter().any(|x| x.exe == r.exe) {
@@ -114,12 +136,14 @@ impl Config {
             let _ = std::fs::create_dir_all(dir);
         }
         let mut text = format!(
-            "liion={}\nliion_step={}\ntray_icon={}\npower={}\nauto_power={}\n",
+            "liion={}\nliion_step={}\ntray_icon={}\npower={}\nauto_power={}\ndpi_popup={}\nhotkeys={}\n",
             self.liion as u8,
             self.liion_step as u8,
             self.tray_icon.key(),
             self.power.map_or("", Mode::key),
             self.auto_power as u8,
+            self.dpi_popup as u8,
+            self.hotkeys as u8,
         );
         for r in &self.rules {
             text += &format!("app={}\n", r.to_value());

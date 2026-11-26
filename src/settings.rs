@@ -120,6 +120,8 @@ struct View {
     tray_icon: usize,
     auto_power: bool,
     rules: Vec<AppRule>,
+    dpi_popup: bool,
+    hotkeys: bool,
 }
 
 impl View {
@@ -174,6 +176,8 @@ impl View {
                 .unwrap_or(0),
             auto_power: app.config.auto_power,
             rules: app.config.rules.clone(),
+            dpi_popup: app.config.dpi_popup,
+            hotkeys: app.config.hotkeys,
         }
     }
 
@@ -268,6 +272,8 @@ enum Hit {
     Tab(Tab),
     /// Index into LINKS.
     Link(usize),
+    DpiPopup,
+    Hotkeys,
 }
 
 /// About section links: (label, URL).
@@ -321,6 +327,8 @@ enum Tip {
     TrayIcon,
     Auto,
     AutoPower,
+    DpiPopup,
+    Hotkeys,
 }
 
 impl Tip {
@@ -377,6 +385,15 @@ impl Tip {
             Tip::AutoPower => {
                 "Switches to Power Saver while your PC runs on battery or energy saver is on, \
                  and back afterwards. An app with its own power mode still gets it."
+            }
+            Tip::DpiPopup => {
+                "Shows the new DPI and stage near the bottom of the screen when you press the \
+                 DPI button. The mouse reports the press itself, so this costs no battery."
+            }
+            Tip::Hotkeys => {
+                "Ctrl+Alt+= and Ctrl+Alt+- step through the DPI stages.\n\
+                 Ctrl+Alt+P cycles Power Saver, Balanced and Max.\n\
+                 They work in any app while the tray app runs."
             }
         }
     }
@@ -471,7 +488,7 @@ fn reg_dword(path: &str, name: &str) -> Option<u32> {
     }
 }
 
-fn system_dark() -> bool {
+pub(super) fn system_dark() -> bool {
     reg_dword(
         r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
         "AppsUseLightTheme",
@@ -489,6 +506,13 @@ fn system_accent() -> C {
         ),
         None => C(0.0, 0.47, 0.83, 1.0),
     }
+}
+
+/// The theme's accent as a GDI color (for the tray's DPI popup).
+pub(super) fn accent_rgb(dark: bool) -> u32 {
+    let a = theme(dark).accent;
+    let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    c(a.0) | c(a.1) << 8 | c(a.2) << 16
 }
 
 fn theme(dark: bool) -> Theme {
@@ -1250,7 +1274,7 @@ impl Ui {
             }
             Tab::App => {
                 // Not mouse settings: always enabled.
-                let card = self.card(g, t, y, 2);
+                let card = self.card(g, t, y, 4);
                 let mut ry = card.y + CARD_PAD;
                 self.label_info(g, t, hits, "Tray icon", ry, true, Tip::TrayIcon);
                 let tray_labels = TrayIcon::ALL.map(|t| t.label());
@@ -1277,6 +1301,14 @@ impl Ui {
                     Hit::Autostart,
                     hover,
                 );
+                ry += ROW_H + ROW_GAP;
+                let text = "Show DPI changes on screen";
+                self.info_after(g, t, hits, text, &g.fonts.body, ry, Tip::DpiPopup);
+                self.toggle_row(g, t, hits, ry, text, v.dpi_popup, true, Hit::DpiPopup, hover);
+                ry += ROW_H + ROW_GAP;
+                let text = "Keyboard shortcuts";
+                self.info_after(g, t, hits, text, &g.fonts.body, ry, Tip::Hotkeys);
+                self.toggle_row(g, t, hits, ry, text, v.hotkeys, true, Hit::Hotkeys, hover);
                 y = card.y + card.h + CARD_GAP;
                 y = self.about_app(g, t, hits, y);
             }
@@ -1896,6 +1928,8 @@ fn activate(hit: Hit) {
         Hit::Idle(i) => drop(with_app(|a| a.act(|a| a.set_idle(IDLE_CHOICES[i])))),
         Hit::Power(i) => drop(with_app(|a| a.act(|a| a.set_power(Mode::ALL[i])))),
         Hit::Info(_) => {}
+        Hit::DpiPopup => drop(with_app(|a| a.set_dpi_popup(!v.dpi_popup))),
+        Hit::Hotkeys => drop(with_app(|a| a.set_hotkeys(!v.hotkeys))),
         Hit::Link(i) => {
             if let Some((_, url)) = LINKS.get(i) {
                 unsafe {
@@ -2434,6 +2468,8 @@ mod tests {
             TrayIcon,
             Auto,
             AutoPower,
+            DpiPopup,
+            Hotkeys,
         ] {
             assert!(t.text().len() > 20, "{t:?}");
         }
