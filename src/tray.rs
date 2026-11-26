@@ -1,5 +1,6 @@
-//! Tray app: battery icon, right-click menu, and an on-demand stage editor.
-//! Everything is plain Win32; the editor window only exists while open.
+//! Tray app: battery icon, right-click menu, automatic switching, the DPI
+//! popup and keyboard shortcuts. Everything here is plain Win32 and GDI;
+//! the Direct2D settings window runs as its own `--settings` process.
 
 use std::cell::RefCell;
 use std::mem::{size_of, zeroed};

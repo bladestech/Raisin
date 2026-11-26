@@ -1,8 +1,9 @@
 //! Settings window: custom-drawn with Direct2D/DirectWrite on a Windows 11
 //! acrylic backdrop. Follows the system light/dark theme and accent color.
 //!
-//! The layout adapts to the connected mouse: cards and rows only appear for
-//! features it has, and the window resizes to fit. It runs as its own
+//! The layout adapts to the connected mouse: tabs, cards and rows only
+//! appear for features it has. The window is as tall as its tallest tab and
+//! scrolls when the screen is too small. It runs as its own
 //! `raisin.exe --settings` process, so its memory goes back to Windows when
 //! it closes.
 

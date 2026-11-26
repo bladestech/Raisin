@@ -1,10 +1,10 @@
 //! Automatic switching: per-app rules and following Windows power.
 //!
 //! While an app with a rule is in front, its power mode and/or DPI stage
-//! apply. With "follow Windows power" on, Power Saver applies while the PC
-//! runs on battery or energy saver is on (an app rule's own power mode
-//! wins). When nothing applies any more, the settings from before the
-//! switch come back.
+//! apply. With "Power Saver on battery or energy saver" on, Power Saver
+//! applies while the PC runs on battery or energy saver is on (an app
+//! rule's own power mode wins). When nothing applies any more, the
+//! settings from before the switch come back.
 //!
 //! This module is pure logic; the tray app watches the foreground window
 //! and power state and writes the result to the mouse.
