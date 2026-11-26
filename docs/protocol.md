@@ -137,6 +137,16 @@ Read-only probing (`raisin scan`) also found these, with meanings not yet known:
 | `07/82` | `55` (OpenRazer: dock brightness; this mouse has no dock) |
 | `07/8D` | `00 00 28 01 9C 01 4F 05`: constant across batteries, possibly calibration data |
 
+## Events from the mouse
+
+The mouse also sends small input reports by itself, on the receiver's vendor collections (interface `mi_01`, the generic-desktop collections with usage `0x0000`; collection 6 on the Viper V3 HyperSpeed). They can be read with a plain `ReadFile`, with no polling.
+
+| Report | Meaning |
+|---|---|
+| `05 02 XX XX YY YY` | DPI changed (the DPI button): X and Y DPI, big-endian. `05 02 0C 80 0C 80` = 3200 DPI. |
+
+Seen on the Viper V3 HyperSpeed by pressing the DPI button through all five stages; each press sent exactly one report. Raisin's DPI popup is built on this (`src/events.rs`).
+
 ## Exploring safely
 
 `raisin scan` only sends "get" commands (high bit set), which have not been seen to change anything. Writing to unknown commands can change settings you can't easily read back, so test writes one at a time, read the value back, and restore it.

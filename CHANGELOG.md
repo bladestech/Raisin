@@ -7,6 +7,8 @@ All notable changes to Raisin are listed here. The format follows [Keep a Change
 ### Added
 
 - Automatic switching: per-app rules that change the power mode and/or DPI stage while an app is in front, and an option for Power Saver while the PC is on battery or energy saver. Your settings come back when you switch away or quit Raisin. The tray tooltip shows when a rule is active.
+- DPI popup: pressing the DPI button shows the new DPI and stage near the bottom of the screen. The mouse reports the press itself, so Raisin doesn't poll for it. On by default; turn it off in Settings > App.
+- Keyboard shortcuts (off by default): Ctrl+Alt+= and Ctrl+Alt+- step through DPI stages, Ctrl+Alt+P cycles power modes, each with a popup.
 - About section in the settings window: version, links to GitHub, releases and the issue tracker, and credits.
 
 ### Changed

@@ -22,12 +22,16 @@ use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
+};
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use crate::auto::{self, Snapshot, Target};
 use crate::config::{self, Config, TrayIcon};
 use crate::devices::Device;
+use crate::events;
 use crate::power::{self, Mode};
 use crate::razer::{self, BatteryType, DpiStages, Error, Mouse};
 
@@ -129,6 +133,12 @@ struct App {
     headless: bool,
     /// Automatic switching (tray process only).
     auto: AutoState,
+    /// Mouse whose events (DPI button) are being listened to, and whether
+    /// that worked.
+    events_pid: Option<u16>,
+    events_ok: bool,
+    /// Global hotkeys currently registered.
+    hotkeys_on: bool,
 }
 
 /// What automatic switching knows and has done.
@@ -228,6 +238,7 @@ impl App {
         self.state.connection = connection;
         self.state.connected = true;
         self.state.asleep = false;
+        self.listen_for_events(device.pid);
 
         // Store a read: "not supported" clears the field, other errors are
         // classified (asleep, unplugged) and keep the last known value.
@@ -840,6 +851,164 @@ impl App {
         Ok(())
     }
 
+    // ---------- DPI popup and hotkeys ----------
+
+    /// Start listening for the mouse's own events (DPI button presses), once
+    /// per mouse, and again after it was unplugged.
+    fn listen_for_events(&mut self, pid: u16) {
+        if self.headless {
+            return;
+        }
+        let ended = self.events_ok && !events::listening();
+        if self.events_pid != Some(pid) || ended {
+            self.events_pid = Some(pid);
+            self.events_ok = events::start(pid, post_dpi_event) > 0;
+        }
+    }
+
+    /// The mouse changed DPI by itself (DPI button).
+    fn on_dpi_event(&mut self, x: u16, y: u16) {
+        self.state.dpi = Some((x, y));
+        if let Some(st) = self.state.stages.as_mut() {
+            if let Some(i) = st.stages.iter().position(|s| s.0 == x) {
+                st.active = (i + 1) as u8;
+            }
+        }
+        self.push_icon();
+        if self.config.dpi_popup && !settings_in_front() {
+            self.popup_dpi();
+        }
+    }
+
+    fn popup_dpi(&self) {
+        let Some((x, y)) = self.state.dpi else { return };
+        let title = if x == y {
+            format!("{x} DPI")
+        } else {
+            format!("{x} × {y} DPI")
+        };
+        // Stage dots when the DPI is one of the stages.
+        let dots = self.state.stages.as_ref().and_then(|st| {
+            let i = st.active as usize;
+            (i >= 1 && st.stages.get(i - 1).map(|s| s.0) == Some(x)).then_some((i, st.stages.len()))
+        });
+        osd::show(osd::Content {
+            title,
+            detail: String::new(),
+            dots,
+        });
+    }
+
+    fn popup_power(&self, mode: Mode) {
+        let mut detail = Vec::new();
+        if let Some(p) = self.state.poll {
+            detail.push(format!("{p} Hz"));
+        }
+        if let Some(s) = self.state.idle {
+            detail.push(format!("sleeps after {} min", s / 60));
+        }
+        osd::show(osd::Content {
+            title: mode.label().to_string(),
+            detail: detail.join("  ·  "),
+            dots: None,
+        });
+    }
+
+    /// Register or drop the global hotkeys to match the settings.
+    fn apply_hotkeys(&mut self) {
+        if self.headless || self.config.hotkeys == self.hotkeys_on {
+            return;
+        }
+        unsafe {
+            for (id, _, _) in HOTKEYS {
+                UnregisterHotKey(self.hwnd, id);
+            }
+        }
+        self.hotkeys_on = self.config.hotkeys;
+        if !self.hotkeys_on {
+            return;
+        }
+        let taken: Vec<&str> = HOTKEYS
+            .iter()
+            .filter(
+                |(id, vk, _)| unsafe { RegisterHotKey(self.hwnd, *id, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, *vk) } == 0,
+            )
+            .map(|(_, _, name)| *name)
+            .collect();
+        if !taken.is_empty() {
+            self.notify(
+                "Shortcut already in use",
+                &format!("Another app uses {}, so Raisin can't.", taken.join(", ")),
+            );
+        }
+    }
+
+    /// A shortcut was pressed. Only the changed settings are written and
+    /// the popup shows right away: a full re-read of the mouse would delay
+    /// it by about a second. The state is kept current by the DPI button
+    /// events and the regular refreshes.
+    fn hotkey(&mut self, id: i32) {
+        let result = match id {
+            HK_STAGE_UP | HK_STAGE_DOWN => {
+                let Some(st) = self.state.stages.clone() else {
+                    return;
+                };
+                let n = st.stages.len();
+                let cur = (st.active as usize).clamp(1, n.max(1));
+                let next = if id == HK_STAGE_UP {
+                    (cur + 1).min(n)
+                } else {
+                    cur.saturating_sub(1).max(1)
+                };
+                let r = if next != cur {
+                    self.select_stage(next - 1)
+                } else {
+                    Ok(())
+                };
+                if r.is_ok() {
+                    if let Some(s) = self.state.stages.as_mut() {
+                        s.active = next as u8;
+                    }
+                    self.state.dpi = st.stages.get(next - 1).copied();
+                    self.popup_dpi();
+                }
+                r
+            }
+            HK_POWER => {
+                let cur = self.power_mode().unwrap_or(Mode::Balanced);
+                let i = Mode::ALL.iter().position(|&m| m == cur).unwrap_or(0);
+                let next = Mode::ALL[(i + 1) % Mode::ALL.len()];
+                let r = self.set_power(next);
+                if r.is_ok() {
+                    self.state.poll = next.poll(self.poll_rates()).or(self.state.poll);
+                    if self.state.idle.is_some() {
+                        self.state.idle = Some(next.idle());
+                    }
+                    self.popup_power(next);
+                }
+                r
+            }
+            _ => return,
+        };
+        match result {
+            Ok(()) => self.push_icon(),
+            Err(e) => {
+                self.note_err(&e);
+                self.error_balloon(&e);
+            }
+        }
+    }
+
+    fn set_dpi_popup(&mut self, on: bool) {
+        self.config.dpi_popup = on;
+        self.save_auto_config();
+    }
+
+    fn set_hotkeys(&mut self, on: bool) {
+        self.config.hotkeys = on;
+        self.save_auto_config();
+    }
+
     // ---------- automatic switching ----------
 
     fn snapshot(&self) -> Snapshot {
@@ -1192,6 +1361,39 @@ fn make_battery_icon(level: Option<u8>, active: bool) -> HICON {
     }
 }
 
+// ---------- mouse events and hotkeys ----------
+
+/// Posted by the event listener threads: wParam = X DPI, lParam = Y DPI.
+const WM_DPI_EVENT: u32 = WM_APP + 4;
+
+const HK_STAGE_UP: i32 = 1;
+const HK_STAGE_DOWN: i32 = 2;
+const HK_POWER: i32 = 3;
+const VK_OEM_PLUS: u32 = 0xBB;
+const VK_OEM_MINUS: u32 = 0xBD;
+/// (id, key with Ctrl+Alt, name for messages).
+const HOTKEYS: [(i32, u32, &str); 3] = [
+    (HK_STAGE_UP, VK_OEM_PLUS, "Ctrl+Alt+="),
+    (HK_STAGE_DOWN, VK_OEM_MINUS, "Ctrl+Alt+-"),
+    (HK_POWER, b'P' as u32, "Ctrl+Alt+P"),
+];
+
+/// Runs on a listener thread: hand the event to the tray's thread.
+fn post_dpi_event(x: u16, y: u16) {
+    let tray = TRAY_HWND.load(Ordering::Relaxed);
+    if !tray.is_null() {
+        unsafe { PostMessageW(tray, WM_DPI_EVENT, x as WPARAM, y as LPARAM) };
+    }
+}
+
+/// The settings window is in front (it shows DPI changes itself).
+fn settings_in_front() -> bool {
+    unsafe {
+        let s = FindWindowW(w("RaisinSettings").as_ptr(), null());
+        !s.is_null() && s == GetForegroundWindow()
+    }
+}
+
 // ---------- foreground app and power watching ----------
 
 const TIMER_FOREGROUND: usize = 3;
@@ -1329,6 +1531,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 a.config = Config::load();
                 a.refresh(true);
                 a.apply_tray_mode();
+                a.apply_hotkeys();
                 a.auto_update();
             });
             0
@@ -1352,6 +1555,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if done.is_some() {
                 KillTimer(hwnd, TIMER_FOREGROUND);
             }
+            0
+        }
+        WM_DPI_EVENT => {
+            with_app(|a| a.on_dpi_event(wp as u16, lp as u16));
+            0
+        }
+        WM_HOTKEY => {
+            with_app(|a| a.hotkey(wp as i32));
             0
         }
         WM_POWERBROADCAST => {
@@ -1448,10 +1659,16 @@ pub fn run() {
                 taskbar_created,
                 headless: false,
                 auto: AutoState::default(),
+                events_pid: None,
+                events_ok: false,
+                hotkeys_on: false,
             })
         });
+        // Before the first refresh: the event listener posts to it.
+        TRAY_HWND.store(hwnd, Ordering::Relaxed);
         with_app(|a| {
             a.add_icon();
+            a.apply_hotkeys();
             a.refresh(true);
             a.apply_tray_mode();
             a.auto.foreground = foreground_exe();
@@ -1501,6 +1718,9 @@ pub fn run_settings() {
                 taskbar_created: 0,
                 headless: true,
                 auto: AutoState::default(),
+                events_pid: None,
+                events_ok: false,
+                hotkeys_on: false,
             })
         });
         // Show the window right away ("Reading mouse…"), then fill it in.
@@ -1515,3 +1735,6 @@ pub fn run_settings() {
 
 #[path = "settings.rs"]
 mod settings;
+
+#[path = "osd.rs"]
+mod osd;

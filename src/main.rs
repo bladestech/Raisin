@@ -3,6 +3,7 @@
 mod auto;
 mod config;
 mod devices;
+mod events;
 mod hid;
 mod power;
 mod razer;
