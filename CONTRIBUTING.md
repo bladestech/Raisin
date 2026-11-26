@@ -24,7 +24,7 @@ Add a line to `CHANGELOG.md` under "Unreleased" for anything a user would notice
 
 ## Keeping it light
 
-Raisin's point is to be small. Please keep the tray process free of heavy dependencies; check its memory (Task Manager, "Memory" column) before and after a change. Anything graphical belongs in the settings window, which runs as its own process.
+Raisin's point is to be small. Please keep the tray process free of heavy dependencies; check its memory (Task Manager, "Memory" column) before and after a change. It idles at about 2 MB. The tray may draw small things with plain GDI, like the DPI popup. Direct2D and anything bigger belong in the settings window, which runs as its own process. Don't add polling: prefer events the mouse or Windows sends, as the DPI popup and automatic switching do.
 
 ## Protocol changes
 

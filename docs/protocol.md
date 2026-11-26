@@ -139,7 +139,7 @@ Read-only probing (`raisin scan`) also found these, with meanings not yet known:
 
 ## Events from the mouse
 
-The mouse also sends small input reports by itself, on the receiver's vendor collections (interface `mi_01`, the generic-desktop collections with usage `0x0000`; collection 6 on the Viper V3 HyperSpeed). They can be read with a plain `ReadFile`, with no polling.
+**Raisin finding.** The mouse also sends small input reports by itself, on the receiver's vendor collections (interface `mi_01`, the generic-desktop collections with usage `0x0000`; collection 6 on the Viper V3 HyperSpeed). They can be read with a plain `ReadFile`, with no polling.
 
 | Report | Meaning |
 |---|---|

@@ -6,7 +6,7 @@
 
 <p align="center">
   A tiny, fast replacement for Razer Synapse, for 118 Razer mice.<br>
-  DPI stages, polling rate, battery, scroll wheel and sleep settings, from a ~500 KB exe that idles at about 2 MB of memory.
+  DPI stages, polling rate, battery, power modes and per-app switching, from a ~550 KB exe that idles at about 2 MB of memory.
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshot.png" width="436" alt="Raisin settings window for a Viper V3 HyperSpeed: a Li-ion battery shown as High with the percentage crossed out, voltage, battery type, DPI stages, polling rate, sleep timer, tray icon options and firmware details">
+  <img src="docs/screenshot.png" width="422" alt="Raisin settings window for a Viper V3 HyperSpeed, on its Mouse tab: a Li-ion battery shown as High with the percentage crossed out, voltage, battery type and warning level, DPI stages, and firmware details, with Performance, Automatic and App tabs above">
 </p>
 
 ## Why
@@ -25,7 +25,7 @@ Synapse is a large Electron app with several background services, and it typical
 
 | | Raisin |
 |---|---|
-| Download | one `raisin.exe`, about 500 KB, no installer |
+| Download | one `raisin.exe`, about 550 KB, no installer |
 | Memory, in the tray | about 2 MB |
 | Memory, settings window open | about 11 MB (a separate process that exits when you close it) |
 | Drivers or services | none |
@@ -46,9 +46,9 @@ Synapse is a large Electron app with several background services, and it typical
 - **Info bubbles**: hover an (i) next to a setting to see what it does.
 - **Mouse details**: model, firmware version, USB ID, connection, and a one-click serial number copy for warranty claims.
 - **Tray icon**: battery gauge, logo, or alternating between them.
-- **Start with Windows**, and a **command line** for scripts and hotkeys.
+- **Start with Windows**, and a **command line** for scripts.
 
-The settings window only shows what your mouse supports, and settings are written to the mouse's own memory, so they stick even when Raisin isn't running. No RGB lighting control, by design.
+The settings window has four tabs (Mouse, Performance, Automatic, App) and only shows what your mouse supports. Settings are written to the mouse's own memory, so they stick even when Raisin isn't running. No RGB lighting control, by design.
 
 ## Supported mice
 
@@ -65,7 +65,7 @@ The protocol is shared across these mice and the details per model come from Ope
 
 1. Download `raisin.exe` from the [latest release](https://github.com/bladestech/Raisin/releases/latest).
 2. Run it. The tray icon appears; left-click it for settings, right-click for the quick menu.
-3. Optional: turn on **Start Raisin with Windows** in settings.
+3. Optional: turn on **Start Raisin with Windows** on the settings window's App tab.
 
 Requirements: Windows 10 or 11 (x64). The acrylic window background needs Windows 11; Windows 10 gets a solid background. Raisin needs the Microsoft Visual C++ runtime, which most PCs already have. If it won't start, install the [Visual C++ Redistributable](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist).
 
@@ -75,7 +75,9 @@ If Synapse is installed, quit it first: it overwrites settings and can hold the 
 
 ## Usage
 
-**Tray icon:** hover for battery, DPI and polling rate. Left-click opens settings; right-click opens a menu with the same options.
+**Tray icon:** hover for battery, DPI, polling rate and any automatic rule in effect. Left-click opens settings; right-click opens a quick menu with the everyday options (DPI stage, power mode, polling rate, sleep timer, battery).
+
+**Keyboard shortcuts** (turn on in Settings > App): Ctrl+Alt+= and Ctrl+Alt+- step through DPI stages, Ctrl+Alt+P cycles Power Saver, Balanced and Max.
 
 **Command line:**
 
@@ -112,9 +114,11 @@ The voltage shown is approximate: it's measured by the mouse under load, so it r
 
 Razer mice show up in Windows as standard HID devices. Raisin sends Razer's 90-byte configuration packets as HID feature reports through Windows' built-in `hid.dll`, the same path Synapse uses, without any kernel driver, service or admin rights.
 
-The tray process uses only plain Win32. The settings window is drawn with Direct2D and DirectWrite on a Windows 11 acrylic backdrop and runs as a separate `raisin.exe --settings` process, so the graphics libraries' memory is returned to Windows when you close it.
+The tray process uses only plain Win32 and GDI. The settings window is drawn with Direct2D and DirectWrite on a Windows 11 acrylic backdrop and runs as a separate `raisin.exe --settings` process, so the graphics libraries' memory is returned to Windows when you close it.
 
-Each model's details (USB ID, transaction ID, receiver timing, DPI and polling limits, which features it has) are in a table generated from OpenRazer by [`tools/openrazer_devices.py`](tools/openrazer_devices.py). The packet format and every command Raisin uses, including a few not documented elsewhere (battery type, live cell voltage), are in [docs/protocol.md](docs/protocol.md).
+Apart from reading the battery every 5 minutes, nothing polls in the background. The mouse reports DPI button presses itself, as small input reports that Raisin waits for. Automatic switching hears about the app in front and the power state from Windows notifications.
+
+Each model's details (USB ID, transaction ID, receiver timing, DPI and polling limits, which features it has) are in a table generated from OpenRazer by [`tools/openrazer_devices.py`](tools/openrazer_devices.py). The packet format and every command Raisin uses, including a few not documented elsewhere (battery type, live cell voltage, the DPI button event), are in [docs/protocol.md](docs/protocol.md).
 
 ## Building from source
 
@@ -140,7 +144,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for checks to run before opening a pull r
 
 ## Disclaimer
 
-Raisin is an independent project. It is not affiliated with, endorsed by, or supported by Razer Inc. "Razer", "Synapse", "Viper" and "HyperSpeed" are trademarks of Razer Inc. Raisin only sends configuration commands that have been verified on real hardware, but you use it at your own risk.
+Raisin is an independent project. It is not affiliated with, endorsed by, or supported by Razer Inc. "Razer", "Synapse", "Viper" and "HyperSpeed" are trademarks of Razer Inc. Raisin only sends configuration commands from OpenRazer's driver or ones verified on real hardware, but you use it at your own risk.
 
 ## Credits
 

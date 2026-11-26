@@ -1,5 +1,6 @@
-//! Minimal Windows HID transport: enumerate HID interfaces and exchange
-//! feature reports. No external HID library, just SetupAPI + hid.dll.
+//! Minimal Windows HID transport: enumerate HID interfaces, exchange
+//! feature reports, and read input reports (mouse events). No external HID
+//! library, just SetupAPI + hid.dll.
 
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
