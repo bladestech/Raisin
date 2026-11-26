@@ -40,6 +40,7 @@ Synapse is a large Electron app with several background services, and it typical
 - **Scroll wheel** (Basilisk V3 family): free spin or tactile, scroll acceleration, Smart Reel.
 - **Sleep timer**: 1 to 15 minutes.
 - **Power modes**: one click for **Power Saver** (lowest polling rate, 1-minute sleep), **Balanced** (1000 Hz, 5 minutes) or **Max** (the fastest rate your mouse supports, 5 minutes).
+- **Automatic switching**: per-app rules (for example Max and DPI stage 4 while a game is in front) and Power Saver while your laptop runs on battery or energy saver. Your own settings come back afterwards.
 - **Info bubbles**: hover an (i) next to a setting to see what it does.
 - **Mouse details**: model, firmware version, USB ID, connection, and a one-click serial number copy for warranty claims.
 - **Tray icon**: battery gauge, logo, or alternating between them.

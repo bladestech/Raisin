@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use crate::auto::{AppRule, MAX_RULES};
 use crate::power::Mode;
 
 /// What the tray icon shows.
@@ -35,7 +36,7 @@ impl TrayIcon {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Config {
     /// Li-ion 1.5 V profile: alkaline curve + low threshold.
     pub liion: bool,
@@ -44,6 +45,10 @@ pub struct Config {
     pub tray_icon: TrayIcon,
     /// Power mode picked last; breaks ties where two modes set the same.
     pub power: Option<Mode>,
+    /// Power Saver while on battery or energy saver.
+    pub auto_power: bool,
+    /// Per-app power mode / DPI stage.
+    pub rules: Vec<AppRule>,
 }
 
 /// Regulated Li-ion AAs sit near 1.5 V until they're nearly empty, then
@@ -89,6 +94,14 @@ impl Config {
                     }
                 }
                 "power" => c.power = Mode::parse(v),
+                "auto_power" => c.auto_power = on,
+                "app" => {
+                    if let Some(r) = AppRule::parse(v) {
+                        if c.rules.len() < MAX_RULES && !c.rules.iter().any(|x| x.exe == r.exe) {
+                            c.rules.push(r);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -100,13 +113,17 @@ impl Config {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let text = format!(
-            "liion={}\nliion_step={}\ntray_icon={}\npower={}\n",
+        let mut text = format!(
+            "liion={}\nliion_step={}\ntray_icon={}\npower={}\nauto_power={}\n",
             self.liion as u8,
             self.liion_step as u8,
             self.tray_icon.key(),
-            self.power.map_or("", Mode::key)
+            self.power.map_or("", Mode::key),
+            self.auto_power as u8,
         );
+        for r in &self.rules {
+            text += &format!("app={}\n", r.to_value());
+        }
         let _ = std::fs::write(p, text);
     }
 

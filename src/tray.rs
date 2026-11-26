@@ -4,19 +4,28 @@
 use std::cell::RefCell;
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
 
+use windows_sys::core::GUID;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
+use windows_sys::Win32::System::Power::{RegisterPowerSettingNotification, POWERBROADCAST_SETTING};
 use windows_sys::Win32::System::Registry::*;
+use windows_sys::Win32::System::SystemServices::{GUID_ACDC_POWER_SOURCE, GUID_POWER_SAVING_STATUS};
 use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForSystem, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
+use crate::auto::{self, Snapshot, Target};
 use crate::config::{self, Config, TrayIcon};
 use crate::devices::Device;
 use crate::power::{self, Mode};
@@ -118,6 +127,28 @@ struct App {
     taskbar_created: u32,
     /// True in the settings process: no tray icon or notifications.
     headless: bool,
+    /// Automatic switching (tray process only).
+    auto: AutoState,
+}
+
+/// What automatic switching knows and has done.
+#[derive(Default)]
+struct AutoState {
+    /// File name of the app in front (Raisin's own windows are skipped).
+    foreground: Option<String>,
+    on_battery: bool,
+    battery_saver: bool,
+    energy_saver: bool,
+    /// Settings from before the first automatic switch, restored after.
+    base: Option<Snapshot>,
+    /// What's applied now.
+    active: Option<Target>,
+}
+
+impl AutoState {
+    fn saving(&self) -> bool {
+        self.on_battery || self.battery_saver || self.energy_saver
+    }
 }
 
 /// Tell the tray process to re-read settings and the mouse.
@@ -310,6 +341,9 @@ impl App {
         }
         if let Some(p) = s.poll {
             t += &format!(" · {p} Hz");
+        }
+        if let Some(a) = &self.auto.active {
+            t += &format!("\nAuto: {}", a.label());
         }
         t
     }
@@ -806,6 +840,111 @@ impl App {
         Ok(())
     }
 
+    // ---------- automatic switching ----------
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            poll: self.state.poll,
+            idle: self.state.idle,
+            stage: self.state.stages.as_ref().map(|s| s.active).filter(|&a| a >= 1),
+        }
+    }
+
+    /// Write the settings in `want` that differ from the mouse's.
+    fn write_snapshot(&mut self, want: Snapshot) -> razer::Result<()> {
+        let cur = self.snapshot();
+        if let Some(hz) = want.poll.filter(|_| want.poll != cur.poll) {
+            self.need_mouse()?.set_poll_rate(hz)?;
+        }
+        if let Some(secs) = want.idle.filter(|_| want.idle != cur.idle) {
+            self.need_mouse()?.set_idle_time(secs)?;
+        }
+        if let Some(stage) = want.stage.filter(|_| want.stage != cur.stage) {
+            self.select_stage(stage as usize - 1)?;
+        }
+        Ok(())
+    }
+
+    /// Re-evaluate the rules and switch settings if what applies changed.
+    /// A failed write (mouse asleep) is retried on the next event or timer.
+    fn auto_update(&mut self) {
+        if self.headless {
+            return;
+        }
+        let a = &self.auto;
+        let target = auto::target(
+            &self.config.rules,
+            a.foreground.as_deref(),
+            self.config.auto_power,
+            a.saving(),
+        );
+        if target == self.auto.active {
+            return;
+        }
+        self.refresh(true);
+        if !self.state.connected || self.state.asleep {
+            return;
+        }
+        let want = match &target {
+            Some(t) => {
+                let base = match self.auto.base {
+                    Some(b) => b,
+                    None => *self.auto.base.insert(self.snapshot()),
+                };
+                let stages = self.state.stages.as_ref().map_or(0, |s| s.stages.len());
+                auto::desired(base, t, self.poll_rates(), stages)
+            }
+            None => match self.auto.base {
+                Some(b) => b,
+                None => {
+                    self.auto.active = None;
+                    return;
+                }
+            },
+        };
+        match self.write_snapshot(want) {
+            Ok(()) => {
+                if target.is_none() {
+                    self.auto.base = None;
+                }
+                self.auto.active = target;
+            }
+            Err(e) => self.note_err(&e),
+        }
+        self.refresh(true);
+    }
+
+    /// Change the app rules (settings window); the tray picks them up.
+    fn edit_rules(&mut self, f: impl FnOnce(&mut Vec<auto::AppRule>)) {
+        f(&mut self.config.rules);
+        self.config.rules.truncate(auto::MAX_RULES);
+        self.save_auto_config();
+    }
+
+    fn set_auto_power(&mut self, on: bool) {
+        self.config.auto_power = on;
+        self.save_auto_config();
+    }
+
+    fn save_auto_config(&mut self) {
+        self.config.save();
+        if self.headless {
+            settings::sync(self, false);
+            notify_tray();
+        } else {
+            self.auto_update();
+        }
+    }
+
+    /// Put back the settings from before automatic switching (on exit).
+    fn auto_restore(&mut self) {
+        if let Some(base) = self.auto.base.take() {
+            self.refresh(true);
+            let _ = self.write_snapshot(base);
+        }
+        self.auto.active = None;
+    }
+
     /// The power mode the current settings match, if any.
     fn power_mode(&self) -> Option<Mode> {
         let poll = self.state.poll?;
@@ -1053,6 +1192,111 @@ fn make_battery_icon(level: Option<u8>, active: bool) -> HICON {
     }
 }
 
+// ---------- foreground app and power watching ----------
+
+const TIMER_FOREGROUND: usize = 3;
+/// Wait for the foreground to settle, so alt-tabbing past an app doesn't
+/// switch the mouse back and forth.
+const FOREGROUND_SETTLE_MS: u32 = 1000;
+/// Windows 11 energy saver (not in windows-sys yet).
+const GUID_ENERGY_SAVER_STATUS: GUID = GUID::from_u128(0x550e8400_e29b_41d4_a716_446655440000);
+const PBT_POWERSETTINGCHANGE: usize = 0x8013;
+
+/// The tray window, for the WinEvent callback (which can arrive while the
+/// app state is borrowed, e.g. with the menu open).
+static TRAY_HWND: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(null_mut());
+
+unsafe extern "system" fn on_foreground(_: HWINEVENTHOOK, _: u32, _: HWND, _: i32, _: i32, _: u32, _: u32) {
+    let tray = TRAY_HWND.load(Ordering::Relaxed);
+    if !tray.is_null() {
+        SetTimer(tray, TIMER_FOREGROUND, FOREGROUND_SETTLE_MS, None);
+    }
+}
+
+/// File name of the foreground window's program. None when there's no
+/// foreground window or it belongs to Raisin (the tray menu, the settings
+/// window): those shouldn't switch anything.
+fn foreground_exe() -> Option<String> {
+    let name = window_exe(unsafe { GetForegroundWindow() })?;
+    (name != own_exe()).then_some(name)
+}
+
+/// Lowercase file name of Raisin's exe.
+fn own_exe() -> String {
+    auto::exe_name(&String::from_utf16_lossy(&exe_path()))
+}
+
+/// Lowercase file name of the program that owns window `h`.
+fn window_exe(h: HWND) -> Option<String> {
+    unsafe {
+        if h.is_null() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(h, &mut pid);
+        if pid == 0 || pid == GetCurrentProcessId() {
+            return None;
+        }
+        let p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if p.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(p, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len) != 0;
+        CloseHandle(p);
+        let name = auto::exe_name(&String::from_utf16_lossy(&buf[..len as usize]));
+        (ok && !name.is_empty()).then_some(name)
+    }
+}
+
+fn guid_eq(a: &GUID, b: &GUID) -> bool {
+    a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
+}
+
+unsafe fn watch_system(hwnd: HWND) {
+    TRAY_HWND.store(hwnd, Ordering::Relaxed);
+    SetWinEventHook(
+        EVENT_SYSTEM_FOREGROUND,
+        EVENT_SYSTEM_FOREGROUND,
+        null_mut(),
+        Some(on_foreground),
+        0,
+        0,
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+    );
+    // Each sends its current value right away, then on every change.
+    for g in [
+        GUID_ACDC_POWER_SOURCE,
+        GUID_POWER_SAVING_STATUS,
+        GUID_ENERGY_SAVER_STATUS,
+    ] {
+        RegisterPowerSettingNotification(hwnd, &g, DEVICE_NOTIFY_WINDOW_HANDLE);
+    }
+}
+
+/// A power setting changed: on battery, battery saver, energy saver.
+unsafe fn power_setting_changed(lp: LPARAM) {
+    let s = &*(lp as *const POWERBROADCAST_SETTING);
+    if s.DataLength < 4 {
+        return;
+    }
+    let v = std::ptr::read_unaligned(s.Data.as_ptr() as *const u32);
+    let g = &s.PowerSetting;
+    with_app(|a| {
+        if guid_eq(g, &GUID_ACDC_POWER_SOURCE) {
+            a.auto.on_battery = v != 0; // 0 = AC, 1 = battery, 2 = UPS
+        } else if guid_eq(g, &GUID_POWER_SAVING_STATUS) {
+            a.auto.battery_saver = v != 0;
+        } else if guid_eq(g, &GUID_ENERGY_SAVER_STATUS) {
+            a.auto.energy_saver = v != 0; // 1 = standard, 2 = high savings
+        } else {
+            return;
+        }
+        a.auto_update();
+    });
+}
+
 // ---------- window proc / entry ----------
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -1085,12 +1329,36 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 a.config = Config::load();
                 a.refresh(true);
                 a.apply_tray_mode();
+                a.auto_update();
             });
             0
         }
         WM_TIMER if wp == TIMER_BATTERY => {
-            with_app(|a| a.refresh(false));
+            with_app(|a| {
+                a.refresh(false);
+                a.auto_update(); // retries a switch the sleeping mouse missed
+            });
             0
+        }
+        WM_TIMER if wp == TIMER_FOREGROUND => {
+            let exe = foreground_exe();
+            let done = with_app(|a| {
+                if exe.is_some() && exe != a.auto.foreground {
+                    a.auto.foreground = exe;
+                    a.auto_update();
+                }
+            });
+            // Busy (menu open): try again shortly.
+            if done.is_some() {
+                KillTimer(hwnd, TIMER_FOREGROUND);
+            }
+            0
+        }
+        WM_POWERBROADCAST => {
+            if wp == PBT_POWERSETTINGCHANGE {
+                power_setting_changed(lp);
+            }
+            1
         }
         WM_TIMER if wp == TIMER_ALTERNATE => {
             with_app(|a| {
@@ -1101,6 +1369,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_DESTROY => {
             with_app(|a| {
+                a.auto_restore();
                 let nid = a.nid();
                 Shell_NotifyIconW(NIM_DELETE, &nid);
             });
@@ -1178,13 +1447,17 @@ pub fn run() {
                 config: Config::load(),
                 taskbar_created,
                 headless: false,
+                auto: AutoState::default(),
             })
         });
         with_app(|a| {
             a.add_icon();
             a.refresh(true);
             a.apply_tray_mode();
+            a.auto.foreground = foreground_exe();
+            a.auto_update();
         });
+        watch_system(hwnd);
         SetTimer(hwnd, TIMER_BATTERY, BATTERY_INTERVAL_MS, None);
         message_loop();
     }
@@ -1227,6 +1500,7 @@ pub fn run_settings() {
                 config: Config::load(),
                 taskbar_created: 0,
                 headless: true,
+                auto: AutoState::default(),
             })
         });
         // Show the window right away ("Reading mouse…"), then fill it in.

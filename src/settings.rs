@@ -19,6 +19,7 @@ use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::UI::Controls::MARGINS;
+use windows_numerics::Matrix3x2;
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -30,6 +31,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 use super::{autostart_enabled, set_autostart, w, with_app, App, IDLE_CHOICES};
+use crate::auto::{AppRule, MAX_RULES};
 use crate::config::TrayIcon;
 use crate::power::Mode;
 use crate::razer;
@@ -65,6 +67,9 @@ const CTRL_W: f32 = 252.0;
 const BATTERY_LABELS: [&str; 4] = ["Alkaline", "NiMH", "Lithium", "Li-ion"];
 const LOWBAT_LABELS: [&str; 6] = ["5%", "10%", "15%", "20%", "25%", "30%"];
 const IDLE_LABELS: [&str; 5] = ["1 min", "2 min", "5 min", "10 min", "15 min"];
+/// Header (battery, name, logo) height, then the tab strip.
+const HEADER_H: f32 = 88.0;
+const TAB_H: f32 = 36.0;
 /// Info bubble width.
 const TIP_W: f32 = 264.0;
 const TIP_PAD: f32 = 10.0;
@@ -113,6 +118,8 @@ struct View {
     smart_reel: Option<bool>,
     autostart: bool,
     tray_icon: usize,
+    auto_power: bool,
+    rules: Vec<AppRule>,
 }
 
 impl View {
@@ -165,6 +172,51 @@ impl View {
                 .iter()
                 .position(|&t| t == app.config.tray_icon)
                 .unwrap_or(0),
+            auto_power: app.config.auto_power,
+            rules: app.config.rules.clone(),
+        }
+    }
+
+    /// Tabs with something to show for this mouse.
+    fn tabs(&self) -> Vec<Tab> {
+        if !self.connected {
+            return vec![Tab::App];
+        }
+        let has_poll = !self.poll_rates.is_empty();
+        let mut tabs = vec![Tab::Mouse];
+        if has_poll || self.has_idle || !self.scroll_rows().is_empty() {
+            tabs.push(Tab::Performance);
+        }
+        if has_poll {
+            tabs.push(Tab::Automatic);
+        }
+        tabs.push(Tab::App);
+        tabs
+    }
+
+    /// Scroll wheel toggles this mouse has: (label, on, click, tip).
+    fn scroll_rows(&self) -> Vec<(&'static str, bool, Hit, Tip)> {
+        [
+            ("Free-spin scrolling", self.free_spin, Hit::FreeSpin, Tip::FreeSpin),
+            (
+                "Scroll acceleration",
+                self.scroll_accel,
+                Hit::ScrollAccel,
+                Tip::ScrollAccel,
+            ),
+            ("Smart Reel", self.smart_reel, Hit::SmartReel, Tip::SmartReel),
+        ]
+        .into_iter()
+        .filter_map(|(l, s, h, t)| s.map(|on| (l, on, h, t)))
+        .collect()
+    }
+
+    /// DPI stages a rule can pick (5 until the mouse has been read).
+    fn stage_choices(&self) -> usize {
+        if self.has_stages {
+            self.stages.len()
+        } else {
+            5
         }
     }
 
@@ -208,6 +260,48 @@ enum Hit {
     CopySerial,
     /// Hovering an (i) shows its explanation.
     Info(Tip),
+    AutoPower,
+    RuleMode(usize),
+    RuleStage(usize),
+    RuleRemove(usize),
+    AddRule,
+    Tab(Tab),
+    /// Index into LINKS.
+    Link(usize),
+}
+
+/// About section links: (label, URL).
+const LINKS: [(&str, &str); 4] = [
+    ("GitHub", "https://github.com/bladestech/Raisin"),
+    ("Releases", "https://github.com/bladestech/Raisin/releases"),
+    (
+        "Report an issue",
+        "https://github.com/bladestech/Raisin/issues/new/choose",
+    ),
+    ("OpenRazer", "https://github.com/openrazer/openrazer"),
+];
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Tab {
+    /// Battery, DPI, mouse details.
+    Mouse,
+    /// Power mode, polling rate, sleep timer, scroll wheel.
+    Performance,
+    /// Per-app rules, Power Saver on battery.
+    Automatic,
+    /// Tray icon, start with Windows.
+    App,
+}
+
+impl Tab {
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Mouse => "Mouse",
+            Tab::Performance => "Performance",
+            Tab::Automatic => "Automatic",
+            Tab::App => "App",
+        }
+    }
 }
 
 /// Explanations behind the (i) icons.
@@ -225,6 +319,8 @@ enum Tip {
     Poll,
     Sleep,
     TrayIcon,
+    Auto,
+    AutoPower,
 }
 
 impl Tip {
@@ -272,6 +368,15 @@ impl Tip {
             Tip::TrayIcon => {
                 "What the tray icon shows: the battery gauge, the Raisin logo, or the two \
                  taking turns. The gauge always shows when the battery is low."
+            }
+            Tip::Auto => {
+                "Changes the power mode or DPI stage while an app is in front, like Max and \
+                 a higher DPI stage in a game. Your settings come back when you switch to \
+                 something else or quit Raisin. The tray app does the switching, so keep it running."
+            }
+            Tip::AutoPower => {
+                "Switches to Power Saver while your PC runs on battery or energy saver is on, \
+                 and back afterwards. An app with its own power mode still gets it."
             }
         }
     }
@@ -662,6 +767,12 @@ struct Ui {
     acrylic: bool,
     /// Content height from the last paint, in DIPs.
     content_h: f32,
+    /// Visible client height, in DIPs. Smaller than `content_h` when the
+    /// window is capped to the screen; the content then scrolls.
+    view_h: f32,
+    /// Scroll offset, in DIPs.
+    scroll: f32,
+    tab: Tab,
     /// "Copied" feedback for the serial number.
     copied_until: Option<Instant>,
 }
@@ -723,6 +834,9 @@ pub fn open(app: &App) {
                 dark,
                 acrylic,
                 content_h: INITIAL_HEIGHT,
+                view_h: INITIAL_HEIGHT,
+                scroll: 0.0,
+                tab: Tab::Mouse,
                 copied_until: None,
             })
         });
@@ -777,12 +891,21 @@ fn outer_size(dpi: u32, height: f32) -> (i32, i32) {
     (rc.right - rc.left, rc.bottom - rc.top)
 }
 
-/// Size the window for `height` DIPs of content. `center` places it in the
-/// middle of the work area; otherwise it keeps its vertical center.
+/// Size the window for `height` DIPs of content, capped to the screen it's
+/// on (the content scrolls then). `center` places it in the middle of the
+/// work area; otherwise it keeps its vertical center.
 unsafe fn fit_window(hwnd: HWND, dpi: u32, height: f32, center: bool) {
-    let (ww, wh) = outer_size(dpi, height);
-    let mut work: RECT = zeroed();
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut work as *mut RECT as *mut _, 0);
+    let mut mi: MONITORINFO = zeroed();
+    mi.cbSize = size_of::<MONITORINFO>() as u32;
+    GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut mi);
+    let work = mi.rcWork;
+    let (ww, mut wh) = outer_size(dpi, height);
+    let max_h = work.bottom - work.top;
+    if wh > max_h {
+        // Shrink the client area by the overflow, keeping the frame.
+        let over = (wh - max_h) as f32 * 96.0 / dpi as f32;
+        wh = outer_size(dpi, (height - over).max(200.0)).1;
+    }
     let mut cur: RECT = zeroed();
     GetWindowRect(hwnd, &mut cur);
     let (cx, cy) = if center {
@@ -883,16 +1006,22 @@ fn bump(v: u16, up: bool, max: u16) -> u16 {
 }
 
 /// Top-left of a `w`×`h` info bubble for an (i) at `anchor`: centered under
-/// it, kept inside the window, and flipped above when it won't fit below.
-fn bubble_pos(anchor: Rect, w: f32, h: f32, window_h: f32) -> (f32, f32) {
+/// it, kept inside the visible part of the content (`top`..`bottom`), and
+/// flipped above when it won't fit below.
+fn bubble_pos(anchor: Rect, w: f32, h: f32, top: f32, bottom: f32) -> (f32, f32) {
     let x = (anchor.x + anchor.w / 2.0 - w / 2.0).clamp(PAD / 2.0, WIDTH - PAD / 2.0 - w);
     let below = anchor.y + anchor.h + 4.0;
-    let y = if below + h <= window_h - 4.0 {
+    let y = if below + h <= bottom - 4.0 {
         below
     } else {
-        (anchor.y - 4.0 - h).max(4.0)
+        (anchor.y - 4.0 - h).max(top + 4.0)
     };
     (x, y)
+}
+
+/// Scroll offset kept within the content.
+fn clamp_scroll(scroll: f32, content_h: f32, view_h: f32) -> f32 {
+    scroll.clamp(0.0, (content_h - view_h).max(0.0))
 }
 
 /// Short labels when many rates must fit in the segmented control.
@@ -924,8 +1053,11 @@ impl Ui {
                 t.fallback_bg
             };
             g.rt.Clear(Some(&bg.d2d()));
+            g.rt.SetTransform(&Matrix3x2::translation(0.0, -self.scroll));
         }
         let h = self.draw(&g, &t, &mut hits);
+        unsafe { g.rt.SetTransform(&Matrix3x2::identity()) };
+        self.scrollbar(&g, &t, h);
         let ok = unsafe { g.rt.EndDraw(None, None) }.is_ok();
         self.hits = hits;
         // On device loss, rebuild everything on the next paint.
@@ -934,148 +1066,222 @@ impl Ui {
         }
         if (h - self.content_h).abs() > 0.5 {
             self.content_h = h;
+            self.scroll = clamp_scroll(self.scroll, h, self.view_h);
             // Resize outside this paint (WM_SIZE needs the UI state).
             unsafe { PostMessageW(self.hwnd, WM_FIT, 0, 0) };
         }
     }
 
+    fn scrollable(&self) -> bool {
+        self.content_h > self.view_h + 0.5
+    }
+
+    /// Thin overlay bar on the right while the content is taller than the
+    /// window.
+    fn scrollbar(&self, g: &Gfx, t: &Theme, content_h: f32) {
+        if content_h <= self.view_h + 0.5 {
+            return;
+        }
+        let track = self.view_h - 8.0;
+        let len = (track * self.view_h / content_h).max(24.0);
+        let pos = 4.0 + (track - len) * self.scroll / (content_h - self.view_h);
+        g.fill(Rect::new(WIDTH - 6.0, pos, 3.0, len), 1.5, t.text3);
+    }
+
+    /// Tab shown now: the picked one, or the first one this mouse has.
+    fn current_tab(&self, tabs: &[Tab]) -> Tab {
+        if tabs.contains(&self.tab) {
+            self.tab
+        } else {
+            tabs.first().copied().unwrap_or(Tab::App)
+        }
+    }
+
     /// Draw everything; returns the content height.
     fn draw(&self, g: &Gfx, t: &Theme, hits: &mut Vec<(Rect, Hit)>) -> f32 {
+        self.header(g, t);
+        let v = &self.view;
+        if v.loading {
+            return HEADER_H;
+        }
+        let tabs = v.tabs();
+        let cur = self.current_tab(&tabs);
+        let top = if tabs.len() > 1 {
+            self.tab_bar(g, t, hits, &tabs, cur);
+            HEADER_H + TAB_H + CARD_GAP
+        } else {
+            HEADER_H
+        };
+
+        // The window is as tall as the tallest tab, so switching tabs doesn't
+        // resize it. Measure the others with their drawing clipped away.
+        let mut bottom = top;
+        for &tab in tabs.iter().filter(|&&tab| tab != cur) {
+            let mut scratch = Vec::new();
+            unsafe {
+                g.rt.PushAxisAlignedClip(&Rect::new(0.0, 0.0, 0.0, 0.0).d2d(), D2D1_ANTIALIAS_MODE_ALIASED);
+            }
+            bottom = bottom.max(self.draw_tab(g, t, &mut scratch, tab, top));
+            unsafe { g.rt.PopAxisAlignedClip() };
+        }
+        bottom = bottom.max(self.draw_tab(g, t, hits, cur, top));
+        let height = bottom + PAD - CARD_GAP;
+
+        // Info bubble on top of everything.
+        if let Some(Hit::Info(tip)) = self.hover {
+            if let Some(&(anchor, _)) = hits.iter().find(|(_, h)| *h == Hit::Info(tip)) {
+                let bottom = self.scroll + self.view_h.min(height);
+                self.bubble(g, t, anchor, tip.text(), self.scroll, bottom);
+            }
+        }
+        height
+    }
+
+    /// Tabs under the header, as a segmented strip.
+    fn tab_bar(&self, g: &Gfx, t: &Theme, hits: &mut Vec<(Rect, Hit)>, tabs: &[Tab], cur: Tab) {
+        let r = Rect::new(PAD, HEADER_H, CARD_W, TAB_H);
+        g.fill(r, 8.0, t.ctrl);
+        g.stroke(r, 8.0, 1.0, t.ctrl_stroke);
+        let w = r.w / tabs.len() as f32;
+        for (i, &tab) in tabs.iter().enumerate() {
+            let s = Rect::new(r.x + i as f32 * w, r.y, w, r.h);
+            let hit = Hit::Tab(tab);
+            if tab == cur {
+                g.fill(s.inset(3.0), 6.0, t.card.mix(t.text, 0.06));
+                g.fill(
+                    Rect::new(s.x + s.w / 2.0 - 10.0, s.y + s.h - 6.0, 20.0, 3.0),
+                    1.5,
+                    t.accent,
+                );
+            } else if self.hover == Some(hit) {
+                g.fill(s.inset(3.0), 6.0, t.ctrl_hover);
+            }
+            let fg = if tab == cur { t.text } else { t.text2 };
+            g.text(tab.label(), Rect::new(s.x, s.y - 1.0, s.w, s.h), &g.fonts.center, fg);
+            if tab != cur {
+                hits.push((s, hit));
+            }
+        }
+    }
+
+    /// Draw one tab's cards from `y`; returns the y below the last card.
+    fn draw_tab(&self, g: &Gfx, t: &Theme, hits: &mut Vec<(Rect, Hit)>, tab: Tab, mut y: f32) -> f32 {
         let v = &self.view;
         let usable = v.usable();
         let hover = self.hover;
-
-        self.header(g, t);
-        let mut y = 92.0;
-
-        // --- Battery settings (AA mice and those with a warning threshold) ---
-        if v.connected && (v.battery_choice.is_some() || v.has_lowbat) {
-            let rows = v.battery_choice.is_some() as usize * 2 + v.has_lowbat as usize;
-            let card = self.card(g, t, y, rows);
-            let mut ry = card.y + CARD_PAD;
-            if v.battery_choice.is_some() {
-                self.label_info(g, t, hits, "Battery type", ry, usable, Tip::BatteryType);
+        match tab {
+            Tab::Mouse => {
+                // Battery settings (AA mice and those with a warning threshold)
+                if v.battery_choice.is_some() || v.has_lowbat {
+                    let rows = v.battery_choice.is_some() as usize * 2 + v.has_lowbat as usize;
+                    let card = self.card(g, t, y, rows);
+                    let mut ry = card.y + CARD_PAD;
+                    if v.battery_choice.is_some() {
+                        self.label_info(g, t, hits, "Battery type", ry, usable, Tip::BatteryType);
+                        self.segmented(
+                            g,
+                            t,
+                            hits,
+                            ry,
+                            &BATTERY_LABELS,
+                            v.battery_choice,
+                            usable,
+                            Hit::BatType,
+                            hover,
+                        );
+                        ry += ROW_H + ROW_GAP;
+                    }
+                    if v.has_lowbat {
+                        self.label_info(g, t, hits, "Warn at", ry, usable, Tip::WarnAt);
+                        self.segmented(g, t, hits, ry, &LOWBAT_LABELS, v.lowbat, usable, Hit::Lowbat, hover);
+                        ry += ROW_H + ROW_GAP;
+                    }
+                    if v.battery_choice.is_some() {
+                        let liion = v.battery_choice == Some(3);
+                        let text = "Li-ion cells drop voltage when low";
+                        self.info_after(g, t, hits, text, &g.fonts.body, ry, Tip::LiionStep);
+                        self.toggle_row(g, t, hits, ry, text, v.liion_step, usable && liion, Hit::Step, hover);
+                    }
+                    y = card.y + card.h + CARD_GAP;
+                }
+                if v.has_stages || v.has_dpi {
+                    y = self.dpi_card(g, t, hits, y) + CARD_GAP;
+                }
+                y = self.about(g, t, hits, y);
+            }
+            Tab::Performance => {
+                let has_poll = !v.poll_rates.is_empty();
+                let rows = has_poll as usize * 2 + v.has_idle as usize;
+                if rows > 0 {
+                    let card = self.card(g, t, y, rows);
+                    let mut ry = card.y + CARD_PAD;
+                    if has_poll {
+                        self.label_info(g, t, hits, "Power mode", ry, usable, Tip::Power);
+                        let labels = Mode::ALL.map(Mode::label);
+                        self.segmented(g, t, hits, ry, &labels, v.power, usable, Hit::Power, hover);
+                        ry += ROW_H + ROW_GAP;
+                        self.label_info(g, t, hits, "Polling rate", ry, usable, Tip::Poll);
+                        let many = v.poll_rates.len() > 4;
+                        let labels: Vec<String> = v.poll_rates.iter().map(|&hz| poll_label(hz, many)).collect();
+                        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                        self.segmented(g, t, hits, ry, &refs, v.poll, usable, Hit::Poll, hover);
+                        ry += ROW_H + ROW_GAP;
+                    }
+                    if v.has_idle {
+                        self.label_info(g, t, hits, "Sleep after", ry, usable, Tip::Sleep);
+                        self.segmented(g, t, hits, ry, &IDLE_LABELS, v.idle, usable, Hit::Idle, hover);
+                    }
+                    y = card.y + card.h + CARD_GAP;
+                }
+                let scroll = v.scroll_rows();
+                if !scroll.is_empty() {
+                    let card = self.card(g, t, y, scroll.len());
+                    let mut ry = card.y + CARD_PAD;
+                    for (text, on, hit, tip) in scroll {
+                        self.info_after(g, t, hits, text, &g.fonts.body, ry, tip);
+                        self.toggle_row(g, t, hits, ry, text, on, usable, hit, hover);
+                        ry += ROW_H + ROW_GAP;
+                    }
+                    y = card.y + card.h + CARD_GAP;
+                }
+            }
+            Tab::Automatic => {
+                y = self.auto_card(g, t, hits, y) + CARD_GAP;
+            }
+            Tab::App => {
+                // Not mouse settings: always enabled.
+                let card = self.card(g, t, y, 2);
+                let mut ry = card.y + CARD_PAD;
+                self.label_info(g, t, hits, "Tray icon", ry, true, Tip::TrayIcon);
+                let tray_labels = TrayIcon::ALL.map(|t| t.label());
                 self.segmented(
                     g,
                     t,
                     hits,
                     ry,
-                    &BATTERY_LABELS,
-                    v.battery_choice,
-                    usable,
-                    Hit::BatType,
+                    &tray_labels,
+                    Some(v.tray_icon),
+                    true,
+                    Hit::TrayIcon,
                     hover,
                 );
                 ry += ROW_H + ROW_GAP;
-            }
-            if v.has_lowbat {
-                self.label_info(g, t, hits, "Warn at", ry, usable, Tip::WarnAt);
-                self.segmented(g, t, hits, ry, &LOWBAT_LABELS, v.lowbat, usable, Hit::Lowbat, hover);
-                ry += ROW_H + ROW_GAP;
-            }
-            if v.battery_choice.is_some() {
-                let liion = v.battery_choice == Some(3);
-                let text = "Li-ion cells drop voltage when low";
-                self.info_after(g, t, hits, text, &g.fonts.body, ry, Tip::LiionStep);
-                self.toggle_row(g, t, hits, ry, text, v.liion_step, usable && liion, Hit::Step, hover);
-            }
-            y = card.y + card.h + CARD_GAP;
-        }
-
-        // --- DPI ---
-        if v.connected && (v.has_stages || v.has_dpi) {
-            y = self.dpi_card(g, t, hits, y) + CARD_GAP;
-        }
-
-        // --- Scroll wheel ---
-        let scroll: Vec<(&str, Option<bool>, Hit, Tip)> = [
-            ("Free-spin scrolling", v.free_spin, Hit::FreeSpin, Tip::FreeSpin),
-            (
-                "Scroll acceleration",
-                v.scroll_accel,
-                Hit::ScrollAccel,
-                Tip::ScrollAccel,
-            ),
-            ("Smart Reel", v.smart_reel, Hit::SmartReel, Tip::SmartReel),
-        ]
-        .into_iter()
-        .filter(|(_, s, _, _)| s.is_some())
-        .collect();
-        if v.connected && !scroll.is_empty() {
-            let card = self.card(g, t, y, scroll.len());
-            let mut ry = card.y + CARD_PAD;
-            for (text, on, hit, tip) in scroll {
-                self.info_after(g, t, hits, text, &g.fonts.body, ry, tip);
-                self.toggle_row(g, t, hits, ry, text, on == Some(true), usable, hit, hover);
-                ry += ROW_H + ROW_GAP;
-            }
-            y = card.y + card.h + CARD_GAP;
-        }
-
-        // --- Performance & app ---
-        let has_poll = v.connected && !v.poll_rates.is_empty();
-        let has_idle = v.connected && v.has_idle;
-        let rows = has_poll as usize * 2 + has_idle as usize + 2;
-        let card = self.card(g, t, y, rows);
-        let mut ry = card.y + CARD_PAD;
-        if has_poll {
-            self.label_info(g, t, hits, "Power mode", ry, usable, Tip::Power);
-            let labels = Mode::ALL.map(Mode::label);
-            self.segmented(g, t, hits, ry, &labels, v.power, usable, Hit::Power, hover);
-            ry += ROW_H + ROW_GAP;
-            self.label_info(g, t, hits, "Polling rate", ry, usable, Tip::Poll);
-            let many = v.poll_rates.len() > 4;
-            let labels: Vec<String> = v.poll_rates.iter().map(|&hz| poll_label(hz, many)).collect();
-            let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-            self.segmented(g, t, hits, ry, &refs, v.poll, usable, Hit::Poll, hover);
-            ry += ROW_H + ROW_GAP;
-        }
-        if has_idle {
-            self.label_info(g, t, hits, "Sleep after", ry, usable, Tip::Sleep);
-            self.segmented(g, t, hits, ry, &IDLE_LABELS, v.idle, usable, Hit::Idle, hover);
-            ry += ROW_H + ROW_GAP;
-        }
-        // Not mouse settings: always enabled.
-        self.label_info(g, t, hits, "Tray icon", ry, true, Tip::TrayIcon);
-        let tray_labels = TrayIcon::ALL.map(|t| t.label());
-        self.segmented(
-            g,
-            t,
-            hits,
-            ry,
-            &tray_labels,
-            Some(v.tray_icon),
-            true,
-            Hit::TrayIcon,
-            hover,
-        );
-        ry += ROW_H + ROW_GAP;
-        self.toggle_row(
-            g,
-            t,
-            hits,
-            ry,
-            "Start Raisin with Windows",
-            v.autostart,
-            true,
-            Hit::Autostart,
-            hover,
-        );
-        y = card.y + card.h + CARD_GAP;
-
-        // --- About this mouse ---
-        if v.connected {
-            y = self.about(g, t, hits, y);
-        }
-        let height = y + PAD - CARD_GAP;
-
-        // Info bubble on top of everything.
-        if let Some(Hit::Info(tip)) = hover {
-            if let Some(&(anchor, _)) = hits.iter().find(|(_, h)| *h == Hit::Info(tip)) {
-                self.bubble(g, t, anchor, tip.text(), height);
+                self.toggle_row(
+                    g,
+                    t,
+                    hits,
+                    ry,
+                    "Start Raisin with Windows",
+                    v.autostart,
+                    true,
+                    Hit::Autostart,
+                    hover,
+                );
+                y = card.y + card.h + CARD_GAP;
+                y = self.about_app(g, t, hits, y);
             }
         }
-        height
+        y
     }
 
     /// Row label followed by an (i).
@@ -1110,12 +1316,13 @@ impl Ui {
     }
 
     /// Info bubble under (or, near the bottom, over) `anchor`.
-    fn bubble(&self, g: &Gfx, t: &Theme, anchor: Rect, text: &str, window_h: f32) {
+    #[allow(clippy::too_many_arguments)]
+    fn bubble(&self, g: &Gfx, t: &Theme, anchor: Rect, text: &str, top: f32, bottom: f32) {
         // Non-breaking hyphens: keep "Li-ion" and "1-minute" on one line.
         let text = &text.replace('-', "\u{2011}");
         let text_h = g.wrapped_height(text, &g.fonts.tip, TIP_W - 2.0 * TIP_PAD);
         let h = text_h + 2.0 * TIP_PAD;
-        let (x, y) = bubble_pos(anchor, TIP_W, h, window_h);
+        let (x, y) = bubble_pos(anchor, TIP_W, h, top, bottom);
         let r = Rect::new(x, y, TIP_W, h);
         // Soft shadow, then the bubble.
         g.fill(
@@ -1467,6 +1674,147 @@ impl Ui {
         }
     }
 
+    /// Per-app rules and the Power Saver on battery toggle.
+    fn auto_card(&self, g: &Gfx, t: &Theme, hits: &mut Vec<(Rect, Hit)>, y: f32) -> f32 {
+        let v = &self.view;
+        let hover = self.hover;
+        let can_add = v.rules.len() < MAX_RULES;
+        let rows = v.rules.len() + can_add as usize;
+        let h = CARD_PAD * 2.0 + ROW_H + 6.0 + ROW_H + 8.0 + rows as f32 * 38.0 - 4.0;
+        let card = Rect::new(PAD, y, CARD_W, h);
+        self.card_rect(g, t, card);
+        let cx = PAD + 16.0;
+        let inner_w = CARD_W - 32.0;
+        let mut ry = y + CARD_PAD;
+        let title = "Automatic switching";
+        g.text(title, Rect::new(cx, ry, 220.0, ROW_H), &g.fonts.body_bold, t.text);
+        self.info_after(g, t, hits, title, &g.fonts.body_bold, ry, Tip::Auto);
+        ry += ROW_H + 6.0;
+
+        // Settings, not mouse commands: usable even while the mouse sleeps.
+        let text = "Power Saver on battery or energy saver";
+        self.info_after(g, t, hits, text, &g.fonts.body, ry, Tip::AutoPower);
+        self.toggle_row(g, t, hits, ry, text, v.auto_power, true, Hit::AutoPower, hover);
+        ry += ROW_H + 8.0;
+
+        for (i, r) in v.rules.iter().enumerate() {
+            let row = Rect::new(cx - 6.0, ry + i as f32 * 38.0, inner_w + 12.0, 34.0);
+            let row_hover = matches!(hover, Some(Hit::RuleMode(j) | Hit::RuleStage(j) | Hit::RuleRemove(j)) if j == i);
+            if row_hover {
+                g.fill(row, 6.0, t.ctrl_hover.alpha(0.6));
+            }
+            let name = r.exe.strip_suffix(".exe").unwrap_or(&r.exe);
+            g.text(
+                name,
+                Rect::new(row.x + 14.0, row.y, 112.0, row.h),
+                &g.fonts.body,
+                t.text,
+            );
+
+            let right = row.x + row.w - 10.0;
+            let rm = Rect::new(right - 22.0, row.y + 6.0, 22.0, 22.0);
+            let stage = Rect::new(rm.x - 8.0 - 84.0, row.y + 3.0, 84.0, 28.0);
+            let mode = Rect::new(stage.x - 8.0 - 104.0, row.y + 3.0, 104.0, 28.0);
+            let mode_label = r.mode.map_or("Same mode", Mode::label);
+            let stage_label = r.stage.map_or("Same DPI".to_string(), |s| format!("Stage {s}"));
+            self.dropdown(g, t, hits, mode, mode_label, r.mode.is_some(), Hit::RuleMode(i));
+            self.dropdown(g, t, hits, stage, &stage_label, r.stage.is_some(), Hit::RuleStage(i));
+            if hover == Some(Hit::RuleRemove(i)) {
+                g.fill(rm, 11.0, t.ctrl_hover);
+            }
+            g.text(
+                "\u{E711}",
+                rm,
+                &g.fonts.glyph,
+                if row_hover { t.text2 } else { t.text3 },
+            );
+            hits.push((rm, Hit::RuleRemove(i)));
+        }
+        if can_add {
+            let row = Rect::new(cx - 6.0, ry + v.rules.len() as f32 * 38.0, inner_w + 12.0, 34.0);
+            if hover == Some(Hit::AddRule) {
+                g.fill(row, 6.0, t.ctrl_hover);
+            }
+            let label = Rect::new(row.x + 14.0, row.y, row.w - 14.0, row.h);
+            g.text("+  Add app", label, &g.fonts.body, t.text2);
+            hits.push((row, Hit::AddRule));
+        }
+        y + h
+    }
+
+    /// A button that opens a menu: "Label  ⌄".
+    #[allow(clippy::too_many_arguments)]
+    fn dropdown(&self, g: &Gfx, t: &Theme, hits: &mut Vec<(Rect, Hit)>, r: Rect, label: &str, set: bool, hit: Hit) {
+        let fill = if self.hover == Some(hit) {
+            t.ctrl_hover.mix(t.ctrl, 0.3)
+        } else {
+            t.ctrl
+        };
+        g.fill(r, 6.0, fill);
+        g.stroke(r, 6.0, 1.0, t.ctrl_stroke);
+        let fg = if set { t.text } else { t.text2 };
+        g.text(label, Rect::new(r.x + 10.0, r.y, r.w - 30.0, r.h), &g.fonts.small, fg);
+        g.text(
+            "\u{E70D}",
+            Rect::new(r.x + r.w - 24.0, r.y, 16.0, r.h),
+            &g.fonts.glyph,
+            t.text2,
+        );
+        hits.push((r, hit));
+    }
+
+    /// About Raisin: version, what it is, links, credits.
+    fn about_app(&self, g: &Gfx, t: &Theme, hits: &mut Vec<(Rect, Hit)>, y: f32) -> f32 {
+        let h = CARD_PAD * 2.0 + 28.0 + 20.0 + 30.0 + 20.0;
+        let card = Rect::new(PAD, y, CARD_W, h);
+        self.card_rect(g, t, card);
+        let x = PAD + 16.0;
+        let w = CARD_W - 32.0;
+        let mut ly = y + CARD_PAD;
+
+        // "Raisin 0.1.5" with the logo.
+        if let Some(logo) = &g.logo {
+            let r = Rect::new(x, ly + 2.0, 24.0, 24.0);
+            unsafe {
+                g.rt.DrawBitmap(logo, Some(&r.d2d()), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+            }
+        }
+        let name_x = x + 32.0;
+        g.text("Raisin", Rect::new(name_x, ly, 100.0, 28.0), &g.fonts.body_bold, t.text);
+        let vx = name_x + g.measure("Raisin", &g.fonts.body_bold) + 6.0;
+        let version = concat!("Version ", env!("CARGO_PKG_VERSION"));
+        g.text(version, Rect::new(vx, ly + 1.0, 160.0, 28.0), &g.fonts.small, t.text2);
+        ly += 28.0;
+        g.text(
+            "Lightweight Razer mouse settings, without Synapse.",
+            Rect::new(x, ly, w, 20.0),
+            &g.fonts.small,
+            t.text2,
+        );
+        ly += 24.0;
+
+        // Links, side by side.
+        let mut lx = x - 6.0;
+        for (i, (label, _)) in LINKS.iter().enumerate() {
+            let lw = g.measure(label, &g.fonts.small) + 12.0;
+            let r = Rect::new(lx, ly, lw, 24.0);
+            if self.hover == Some(Hit::Link(i)) {
+                g.fill(r, 4.0, t.ctrl_hover);
+            }
+            g.text(label, r, &g.fonts.center, t.accent);
+            hits.push((r, Hit::Link(i)));
+            lx += lw + 4.0;
+        }
+        ly += 30.0;
+        g.text(
+            "Mouse details come from the OpenRazer project. MIT licensed.",
+            Rect::new(x, ly, w, 20.0),
+            &g.fonts.small,
+            t.text3,
+        );
+        y + h + CARD_GAP
+    }
+
     /// Device details: firmware, USB ID, connection, support status, serial.
     fn about(&self, g: &Gfx, t: &Theme, hits: &mut Vec<(Rect, Hit)>, y: f32) -> f32 {
         let v = &self.view;
@@ -1517,7 +1865,7 @@ impl Ui {
         let x = (lp & 0xFFFF) as i16 as f32;
         let y = ((lp >> 16) & 0xFFFF) as i16 as f32;
         let s = 96.0 / self.dpi as f32;
-        (x * s, y * s)
+        (x * s, y * s + self.scroll)
     }
 
     fn edit_dpi(&mut self, f: impl FnOnce(&mut Vec<u16>, u16)) {
@@ -1548,6 +1896,92 @@ fn activate(hit: Hit) {
         Hit::Idle(i) => drop(with_app(|a| a.act(|a| a.set_idle(IDLE_CHOICES[i])))),
         Hit::Power(i) => drop(with_app(|a| a.act(|a| a.set_power(Mode::ALL[i])))),
         Hit::Info(_) => {}
+        Hit::Link(i) => {
+            if let Some((_, url)) = LINKS.get(i) {
+                unsafe {
+                    windows_sys::Win32::UI::Shell::ShellExecuteW(
+                        window(),
+                        w("open").as_ptr(),
+                        w(url).as_ptr(),
+                        null(),
+                        null(),
+                        SW_SHOWNORMAL,
+                    );
+                }
+            }
+        }
+        Hit::Tab(tab) => drop(with_ui(|u| {
+            u.tab = tab;
+            u.scroll = 0.0;
+            u.hover = None;
+            unsafe { InvalidateRect(u.hwnd, null(), 0) };
+        })),
+        Hit::AutoPower => drop(with_app(|a| a.set_auto_power(!v.auto_power))),
+        Hit::RuleMode(i) => {
+            let Some(rule) = v.rules.get(i) else { return };
+            let mut items = vec![(1, "Same mode".to_string(), rule.mode.is_none())];
+            items.push((0, String::new(), false));
+            for (k, m) in Mode::ALL.iter().enumerate() {
+                items.push((2 + k, m.label().to_string(), rule.mode == Some(*m)));
+            }
+            let pick = popup(hit, &items, &[]);
+            if pick != 0 {
+                let mode = pick.checked_sub(2).map(|k| Mode::ALL[k]);
+                with_app(|a| a.edit_rules(|r| r[i].mode = mode));
+            }
+        }
+        Hit::RuleStage(i) => {
+            let Some(rule) = v.rules.get(i) else { return };
+            let mut items = vec![(1, "Same DPI".to_string(), rule.stage.is_none())];
+            items.push((0, String::new(), false));
+            for s in 1..=v.stage_choices() {
+                let label = match v.stages.get(s - 1) {
+                    Some(dpi) => format!("Stage {s}  ·  {dpi} DPI"),
+                    None => format!("Stage {s}"),
+                };
+                items.push((1 + s, label, rule.stage == Some(s as u8)));
+            }
+            let pick = popup(hit, &items, &[]);
+            if pick != 0 {
+                let stage = pick.checked_sub(1).filter(|&s| s > 0).map(|s| s as u8);
+                with_app(|a| a.edit_rules(|r| r[i].stage = stage));
+            }
+        }
+        Hit::RuleRemove(i) => drop(with_app(|a| {
+            a.edit_rules(|r| {
+                if i < r.len() {
+                    r.remove(i);
+                }
+            })
+        })),
+        Hit::AddRule => {
+            let apps = running_apps();
+            let taken: Vec<usize> = (0..apps.len())
+                .filter(|&k| v.rules.iter().any(|r| r.exe == apps[k]))
+                .collect();
+            let mut items: Vec<(usize, String, bool)> = apps
+                .iter()
+                .enumerate()
+                .map(|(k, a)| (100 + k, a.strip_suffix(".exe").unwrap_or(a).to_string(), false))
+                .collect();
+            let grayed: Vec<usize> = taken.iter().map(|k| 100 + k).collect();
+            if !items.is_empty() {
+                items.push((0, String::new(), false));
+            }
+            items.push((1, "Browse for a program…".to_string(), false));
+            let pick = popup(hit, &items, &grayed);
+            let exe = match pick {
+                0 => None,
+                1 => browse_exe(window()),
+                k => apps.get(k - 100).cloned(),
+            };
+            if let Some(exe) = exe.filter(|e| !e.is_empty() && !v.rules.iter().any(|r| r.exe == *e)) {
+                // A new rule starts on Max: the usual reason to add a game.
+                let mut rule = AppRule::new(&exe);
+                rule.mode = Some(Mode::Max);
+                with_app(|a| a.edit_rules(|r| r.push(rule)));
+            }
+        }
         Hit::FreeSpin => {
             let on = toggle(v.free_spin);
             with_app(|a| a.act(|a| a.need_mouse()?.set_free_spin(on)));
@@ -1623,6 +2057,128 @@ fn activate(hit: Hit) {
     }
 }
 
+/// Show a menu under the control for `hit`. `items` are (id, label,
+/// checked); id 0 is a separator. Returns the picked id, or 0.
+fn popup(hit: Hit, items: &[(usize, String, bool)], grayed: &[usize]) -> usize {
+    let Some((hwnd, pt)) = with_ui(|u| {
+        let r = u.hits.iter().find(|(_, h)| *h == hit).map(|(r, _)| *r)?;
+        let s = u.dpi as f32 / 96.0;
+        let mut pt = POINT {
+            x: (r.x * s).round() as i32,
+            y: ((r.y + r.h - u.scroll) * s).round() as i32 + 2,
+        };
+        unsafe { ClientToScreen(u.hwnd, &mut pt) };
+        Some((u.hwnd, pt))
+    })
+    .flatten() else {
+        return 0;
+    };
+    unsafe {
+        let menu = CreatePopupMenu();
+        for (id, label, checked) in items {
+            if *id == 0 {
+                AppendMenuW(menu, MF_SEPARATOR, 0, null());
+                continue;
+            }
+            let mut flags = MF_STRING;
+            if *checked {
+                flags |= MF_CHECKED;
+            }
+            if grayed.contains(id) {
+                flags |= MF_GRAYED;
+            }
+            AppendMenuW(menu, flags, *id, w(label).as_ptr());
+        }
+        let pick = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
+            pt.x,
+            pt.y,
+            0,
+            hwnd,
+            null(),
+        );
+        DestroyMenu(menu);
+        // The menu ate the mouse-up; drop the stale hover.
+        with_ui(|u| {
+            u.hover = None;
+            u.tracking = false;
+            InvalidateRect(u.hwnd, null(), 0);
+        });
+        pick.max(0) as usize
+    }
+}
+
+/// Programs with a normal window open, for "Add app". Skips Raisin and
+/// shell hosts a rule would make no sense for.
+fn running_apps() -> Vec<String> {
+    const SKIP: [&str; 6] = [
+        "applicationframehost.exe",
+        "textinputhost.exe",
+        "shellexperiencehost.exe",
+        "startmenuexperiencehost.exe",
+        "searchhost.exe",
+        "lockapp.exe",
+    ];
+    unsafe extern "system" fn add(h: HWND, lp: LPARAM) -> windows_sys::core::BOOL {
+        let list = &mut *(lp as *mut Vec<String>);
+        let ex = GetWindowLongW(h, GWL_EXSTYLE) as u32;
+        if IsWindowVisible(h) == 0
+            || GetWindowTextLengthW(h) == 0
+            || ex & WS_EX_TOOLWINDOW != 0
+            || !GetWindow(h, GW_OWNER).is_null()
+        {
+            return 1;
+        }
+        // Hidden UWP windows and other virtual desktops' windows.
+        let mut cloaked = 0u32;
+        let r = DwmGetWindowAttribute(
+            WHWND(h),
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut u32 as *mut _,
+            size_of::<u32>() as u32,
+        );
+        if r.is_ok() && cloaked != 0 {
+            return 1;
+        }
+        if let Some(name) = super::window_exe(h) {
+            if !list.contains(&name) {
+                list.push(name);
+            }
+        }
+        1
+    }
+    let mut list: Vec<String> = Vec::new();
+    unsafe { EnumWindows(Some(add), &mut list as *mut Vec<String> as LPARAM) };
+    let own = super::own_exe();
+    list.retain(|n| *n != own && !SKIP.contains(&n.as_str()));
+    list.sort();
+    list
+}
+
+/// Pick a program file; returns its lowercase file name.
+fn browse_exe(owner: HWND) -> Option<String> {
+    use windows_sys::Win32::UI::Controls::Dialogs::*;
+    let mut file = [0u16; 1024];
+    let filter: Vec<u16> = "Programs (*.exe)\0*.exe\0\0".encode_utf16().collect();
+    let title = w("Choose a program");
+    unsafe {
+        let mut ofn: OPENFILENAMEW = zeroed();
+        ofn.lStructSize = size_of::<OPENFILENAMEW>() as u32;
+        ofn.hwndOwner = owner;
+        ofn.lpstrFilter = filter.as_ptr();
+        ofn.lpstrFile = file.as_mut_ptr();
+        ofn.nMaxFile = file.len() as u32;
+        ofn.lpstrTitle = title.as_ptr();
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_HIDEREADONLY | OFN_EXPLORER;
+        if GetOpenFileNameW(&mut ofn) == 0 {
+            return None;
+        }
+    }
+    let n = file.iter().position(|&c| c == 0).unwrap_or(0);
+    Some(crate::auto::exe_name(&String::from_utf16_lossy(&file[..n])))
+}
+
 unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_PAINT => {
@@ -1645,6 +2201,8 @@ unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) ->
                 if let Some(g) = &u.gfx {
                     let _ = g.rt.Resize(&D2D_SIZE_U { width: cw, height: ch });
                 }
+                u.view_h = ch as f32 * 96.0 / u.dpi as f32;
+                u.scroll = clamp_scroll(u.scroll, u.content_h, u.view_h);
                 InvalidateRect(hwnd, null(), 0);
             });
             0
@@ -1736,7 +2294,9 @@ unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) ->
             0
         }
         WM_MOUSEWHEEL => {
-            // Scroll over a DPI row to nudge its value.
+            // Over a DPI value: nudge it. Elsewhere, scroll the window if
+            // it doesn't fit. When it scrolls, only the steppers nudge, so
+            // scrolling past the DPI card doesn't change DPI.
             let delta = ((wp >> 16) & 0xFFFF) as i16;
             let mut pt = POINT {
                 x: (lp & 0xFFFF) as i16 as i32,
@@ -1745,10 +2305,23 @@ unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) ->
             ScreenToClient(hwnd, &mut pt);
             with_ui(|u| {
                 let s = 96.0 / u.dpi as f32;
-                if let Some(Hit::Stage(i) | Hit::Minus(i) | Hit::Plus(i) | Hit::Remove(i)) =
-                    u.hit_at(pt.x as f32 * s, pt.y as f32 * s)
-                {
+                let (x, y) = (pt.x as f32 * s, pt.y as f32 * s + u.scroll);
+                let hit = u.hit_at(x, y);
+                let nudge = match hit {
+                    Some(Hit::Minus(i) | Hit::Plus(i)) => Some(i),
+                    Some(Hit::Stage(i) | Hit::Remove(i)) if !u.scrollable() => Some(i),
+                    _ => None,
+                };
+                if let Some(i) = nudge {
                     u.edit_dpi(|st, max| st[i] = bump(st[i], delta > 0, max));
+                } else if u.scrollable() {
+                    let scroll = clamp_scroll(u.scroll - delta as f32 / 120.0 * 60.0, u.content_h, u.view_h);
+                    if scroll != u.scroll {
+                        u.scroll = scroll;
+                        // What's under the pointer moved.
+                        u.hover = u.hit_at(x, pt.y as f32 * s + scroll);
+                        InvalidateRect(hwnd, null(), 0);
+                    }
                 }
             });
             0
@@ -1820,17 +2393,27 @@ mod tests {
     fn bubbles_stay_inside_the_window() {
         let w = TIP_W;
         // Under the icon when there's room.
-        let (x, y) = bubble_pos(Rect::new(100.0, 100.0, 20.0, 20.0), w, 80.0, 600.0);
+        let (x, y) = bubble_pos(Rect::new(100.0, 100.0, 20.0, 20.0), w, 80.0, 0.0, 600.0);
         assert_eq!(y, 124.0);
         assert!(x >= 0.0 && x + w <= WIDTH);
         // Flipped above near the bottom.
-        let (_, y) = bubble_pos(Rect::new(100.0, 560.0, 20.0, 20.0), w, 80.0, 600.0);
+        let (_, y) = bubble_pos(Rect::new(100.0, 560.0, 20.0, 20.0), w, 80.0, 0.0, 600.0);
         assert_eq!(y, 560.0 - 4.0 - 80.0);
         // Pulled in from the edges.
-        let (x, _) = bubble_pos(Rect::new(10.0, 100.0, 20.0, 20.0), w, 80.0, 600.0);
+        let (x, _) = bubble_pos(Rect::new(10.0, 100.0, 20.0, 20.0), w, 80.0, 0.0, 600.0);
         assert_eq!(x, PAD / 2.0);
-        let (x, _) = bubble_pos(Rect::new(WIDTH - 20.0, 100.0, 20.0, 20.0), w, 80.0, 600.0);
+        let (x, _) = bubble_pos(Rect::new(WIDTH - 20.0, 100.0, 20.0, 20.0), w, 80.0, 0.0, 600.0);
         assert_eq!(x, WIDTH - PAD / 2.0 - w);
+        // Scrolled: stays below the visible top.
+        let (_, y) = bubble_pos(Rect::new(100.0, 420.0, 20.0, 20.0), w, 80.0, 400.0, 500.0);
+        assert_eq!(y, 404.0);
+    }
+
+    #[test]
+    fn scrolling_stays_within_the_content() {
+        assert_eq!(clamp_scroll(-10.0, 1000.0, 800.0), 0.0);
+        assert_eq!(clamp_scroll(500.0, 1000.0, 800.0), 200.0);
+        assert_eq!(clamp_scroll(50.0, 600.0, 800.0), 0.0);
     }
 
     #[test]
@@ -1849,6 +2432,8 @@ mod tests {
             Poll,
             Sleep,
             TrayIcon,
+            Auto,
+            AutoPower,
         ] {
             assert!(t.text().len() > 20, "{t:?}");
         }

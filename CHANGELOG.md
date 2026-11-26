@@ -4,6 +4,15 @@ All notable changes to Raisin are listed here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+
+- Automatic switching: per-app rules that change the power mode and/or DPI stage while an app is in front, and an option for Power Saver while the PC is on battery or energy saver. Your settings come back when you switch away or quit Raisin. The tray tooltip shows when a rule is active.
+- About section in the settings window: version, links to GitHub, releases and the issue tracker, and credits.
+
+### Changed
+
+- The settings window is split into tabs (Mouse, Performance, Automatic, App), so it stays compact, and it scrolls when a screen is too small to fit it.
+
 ## [0.1.5] - 2026-11-25
 
 ### Added

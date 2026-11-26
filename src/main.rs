@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod auto;
 mod config;
 mod devices;
 mod hid;
