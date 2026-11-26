@@ -960,7 +960,11 @@ impl App {
                 } else {
                     cur.saturating_sub(1).max(1)
                 };
-                let r = if next != cur { self.select_stage(next - 1) } else { Ok(()) };
+                let r = if next != cur {
+                    self.select_stage(next - 1)
+                } else {
+                    Ok(())
+                };
                 if r.is_ok() {
                     if let Some(s) = self.state.stages.as_mut() {
                         s.active = next as u8;
