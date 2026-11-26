@@ -1,6 +1,6 @@
 [package]
 name = "raisin"
-version = "0.1.5"
+version = "0.2.0"
 edition = "2021"
 description = "Lightweight Razer mouse configurator for Windows (DPI, polling rate, battery)"
 license = "MIT"
