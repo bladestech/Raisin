@@ -37,6 +37,7 @@ Synapse is a large Electron app with several background services, and it typical
 - **Battery**: level, charging status, approximate cell voltage on AA mice, and a tray icon gauge that turns orange and red as it drains.
 - **Battery type** (AA mice): Alkaline, NiMH or Lithium discharge curves, plus a **Li-ion 1.5 V** profile for regulated rechargeable AAs that shows **High** or **Low** instead of a misleading percentage (see [Battery notes](#battery-notes)).
 - **Low-battery warning**: set where the mouse starts blinking red (5 to 30%), with a matching Windows notification.
+- **Battery history and estimate**: a graph of the last 7 days, and roughly how long the battery should last ("about 3 weeks left") once there's enough history. The Li-ion profile graphs voltage and skips the estimate.
 - **Scroll wheel** (Basilisk V3 family): free spin or tactile, scroll acceleration, Smart Reel.
 - **Sleep timer**: 1 to 15 minutes.
 - **Power modes**: one click for **Power Saver** (lowest polling rate, 1-minute sleep), **Balanced** (1000 Hz, 5 minutes) or **Max** (the fastest rate your mouse supports, 5 minutes).
@@ -48,7 +49,7 @@ Synapse is a large Electron app with several background services, and it typical
 - **Tray icon**: battery gauge, logo, or alternating between them.
 - **Start with Windows**, and a **command line** for scripts.
 
-The settings window has four tabs (Mouse, Performance, Automatic, App) and only shows what your mouse supports. Settings are written to the mouse's own memory, so they stick even when Raisin isn't running. No RGB lighting control, by design.
+The settings window has five tabs (Mouse, Battery, Performance, Automatic, App) and only shows what your mouse supports. Settings are written to the mouse's own memory, so they stick even when Raisin isn't running. No RGB lighting control, by design.
 
 ## Supported mice
 
@@ -96,6 +97,7 @@ raisin battery <alkaline|nimh|lithium|liion|liion-step>
 raisin scroll <tactile|freespin>
 raisin accel <on|off>       scroll acceleration
 raisin smartreel <on|off>
+raisin history              battery history summary and estimate
 raisin devices              list supported mice
 raisin probe                list Razer HID interfaces (for bug reports)
 raisin scan [ids]           read-only dump of battery-class commands
@@ -116,7 +118,7 @@ Razer mice show up in Windows as standard HID devices. Raisin sends Razer's 90-b
 
 The tray process uses only plain Win32 and GDI. The settings window is drawn with Direct2D and DirectWrite on a Windows 11 acrylic backdrop and runs as a separate `raisin.exe --settings` process, so the graphics libraries' memory is returned to Windows when you close it.
 
-Apart from reading the battery every 5 minutes, nothing polls in the background. The mouse reports DPI button presses itself, as small input reports that Raisin waits for. Automatic switching hears about the app in front and the power state from Windows notifications.
+Apart from reading the battery every 5 minutes (and adding that reading to the history file), nothing polls in the background. The mouse reports DPI button presses itself, as small input reports that Raisin waits for. Automatic switching hears about the app in front and the power state from Windows notifications.
 
 Each model's details (USB ID, transaction ID, receiver timing, DPI and polling limits, which features it has) are in a table generated from OpenRazer by [`tools/openrazer_devices.py`](tools/openrazer_devices.py). The packet format and every command Raisin uses, including a few not documented elsewhere (battery type, live cell voltage, the DPI button event), are in [docs/protocol.md](docs/protocol.md).
 
@@ -140,7 +142,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for checks to run before opening a pull r
 
 1. Turn off **Start Raisin with Windows** (or delete `Raisin` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`).
 2. Right-click the tray icon and choose **Exit**.
-3. Delete `raisin.exe` and the `%APPDATA%\Raisin` folder.
+3. Delete `raisin.exe` and the `%APPDATA%\Raisin` folder (settings and battery history).
 
 ## Disclaimer
 
