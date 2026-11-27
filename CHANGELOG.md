@@ -4,6 +4,8 @@ All notable changes to Raisin are listed here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-11-27
+
 ### Added
 
 - Battery history: the tray records a reading every 5 minutes to `%APPDATA%\Raisin\battery.csv` (kept for 60 days), and the new Battery tab graphs the last 7 days. With the Li-ion profile the graph shows voltage instead of the percentage.
@@ -54,7 +56,8 @@ First release: a lightweight Razer Synapse replacement for Windows.
 - Start with Windows.
 - Command line: `info`, `dpi`, `stages`, `stage`, `poll`, `sleep`, `lowbat`, `battery`, `scroll`, `accel`, `smartreel`, `devices`, `probe`, `scan`.
 
-[Unreleased]: https://github.com/bladestech/Raisin/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/bladestech/Raisin/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/bladestech/Raisin/compare/v0.2.0...v0.2.5
 [0.2.0]: https://github.com/bladestech/Raisin/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/bladestech/Raisin/compare/v0.1.0...v0.1.5
 [0.1.0]: https://github.com/bladestech/Raisin/releases/tag/v0.1.0
