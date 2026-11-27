@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshot-v0.2.0.png" width="422" alt="Raisin settings window for a Viper V3 HyperSpeed, on its Mouse tab: a Li-ion battery shown as High with the percentage crossed out, voltage, battery type and warning level, DPI stages, and firmware details, with Performance, Automatic and App tabs above">
+  <img src="docs/screenshot-v0.2.5.png" width="422" alt="Raisin settings window for a Viper V3 HyperSpeed, on its Mouse tab: a Li-ion battery shown as High with the percentage crossed out and the voltage, five DPI stages with stage 3 active, and firmware details, with Battery, Performance, Automatic and App tabs above">
 </p>
 
 ## Why
