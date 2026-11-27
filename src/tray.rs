@@ -32,7 +32,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use crate::auto::{self, Snapshot, Target};
 use crate::config::{self, Config, TrayIcon};
 use crate::devices::Device;
+use crate::estimate::{self, Estimate};
 use crate::events;
+use crate::history::{self, Cell, Sample};
 use crate::power::{self, Mode};
 use crate::razer::{self, BatteryType, DpiStages, Error, Mouse};
 
@@ -140,7 +142,22 @@ struct App {
     events_ok: bool,
     /// Global hotkeys currently registered.
     hotkeys_on: bool,
+    /// Battery history (tray process only).
+    history: HistoryState,
 }
+
+/// What the tray remembers of the battery history between readings.
+#[derive(Default)]
+struct HistoryState {
+    /// Newest line in the file; read from disk on first use.
+    last: Option<Option<Sample>>,
+    /// Latest estimate, and when it was worked out.
+    estimate: Option<Estimate>,
+    computed: Option<Instant>,
+}
+
+/// Work the estimate out again this often (it reads the whole file).
+const ESTIMATE_EVERY: Duration = Duration::from_secs(60 * 60);
 
 /// What automatic switching knows and has done.
 #[derive(Default)]
@@ -288,8 +305,62 @@ impl App {
                 }
             }
         }
+        self.record_history();
         self.update_icon();
         self.check_low_battery();
+    }
+
+    /// What the current reading's battery is, for the history. None when
+    /// unknown (an AA mouse whose battery type hasn't been read yet).
+    fn cell(&self) -> Option<Cell> {
+        Some(match self.state.battery_type {
+            _ if self.liion() => Cell::Liion,
+            Some(BatteryType::Alkaline) => Cell::Alkaline,
+            Some(BatteryType::NiMH) => Cell::NiMH,
+            Some(BatteryType::Lithium) => Cell::Lithium,
+            None if self.state.device?.charging => Cell::Builtin,
+            None => return None,
+        })
+    }
+
+    /// Add the latest reading to the battery history, and refresh the
+    /// estimate when it's due.
+    fn record_history(&mut self) {
+        let s = &self.state;
+        if self.headless || !s.connected || s.asleep {
+            return;
+        }
+        let (Some(percent), Some(cell)) = (s.battery, self.cell()) else {
+            return;
+        };
+        let sample = Sample {
+            time: history::now(),
+            percent,
+            voltage_mv: s.voltage_mv,
+            charging: s.charging == Some(true),
+            cell,
+        };
+        let last = *self.history.last.get_or_insert_with(history::last);
+        if !history::should_record(last.as_ref(), &sample) {
+            return;
+        }
+        history::record(&sample);
+        self.history.last = Some(Some(sample));
+        let changed = last.is_none_or(|l| l.charging != sample.charging || l.cell != sample.cell);
+        let due = self.history.computed.is_none_or(|t| t.elapsed() >= ESTIMATE_EVERY);
+        if changed || due {
+            self.history.estimate = estimate::estimate(&history::load(), sample.time);
+            self.history.computed = Some(Instant::now());
+        }
+    }
+
+    /// "about 3 weeks left", counted down from when it was worked out.
+    fn estimate_text(&self) -> Option<String> {
+        let e = self.history.estimate?;
+        let left = e
+            .remaining_secs
+            .saturating_sub(self.history.computed?.elapsed().as_secs());
+        Some(format!("{} left", estimate::describe(left)))
     }
 
     /// Li-ion profile active (alkaline curve + Raisin's Li-ion setting).
@@ -347,6 +418,9 @@ impl App {
         let mut t = self.device_name().to_string();
         if let Some(b) = self.battery_text() {
             t += &format!("\nBattery {b}");
+            if let Some(e) = self.estimate_text().filter(|_| s.charging != Some(true)) {
+                t += &format!(", {e}");
+            }
         }
         if let Some((x, _)) = s.dpi {
             t += &format!("\n{x} DPI");
@@ -1663,6 +1737,7 @@ pub fn run() {
                 events_pid: None,
                 events_ok: false,
                 hotkeys_on: false,
+                history: HistoryState::default(),
             })
         });
         // Before the first refresh: the event listener posts to it.
@@ -1722,6 +1797,7 @@ pub fn run_settings() {
                 events_pid: None,
                 events_ok: false,
                 hotkeys_on: false,
+                history: HistoryState::default(),
             })
         });
         // Show the window right away ("Reading mouse…"), then fill it in.

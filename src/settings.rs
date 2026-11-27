@@ -20,7 +20,7 @@ use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::UI::Controls::MARGINS;
-use windows_numerics::Matrix3x2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -34,6 +34,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use super::{autostart_enabled, set_autostart, w, with_app, App, IDLE_CHOICES};
 use crate::auto::{AppRule, MAX_RULES};
 use crate::config::TrayIcon;
+use crate::estimate;
+use crate::history::{self, Sample};
 use crate::power::Mode;
 use crate::razer;
 
@@ -123,12 +125,82 @@ struct View {
     rules: Vec<AppRule>,
     dpi_popup: bool,
     hotkeys: bool,
+    /// Battery history graph: (x, y, charging), x and y from 0 to 1 across
+    /// the last GRAPH_DAYS. y is the percentage, or the voltage for Li-ion.
+    graph: Vec<(f32, f32, bool)>,
+    graph_volts: bool,
+    /// "about 3 weeks left"
+    estimate: Option<String>,
+}
+
+/// The battery graph covers this many days, one point per hour at most.
+const GRAPH_DAYS: u64 = 7;
+const GRAPH_POINTS: f32 = (GRAPH_DAYS * 24) as f32;
+/// Li-ion graph range, millivolts: where these cells sit.
+const LIION_GRAPH_MV: (f32, f32) = (1300.0, 1550.0);
+const GRAPH_H: f32 = 64.0;
+
+thread_local! {
+    /// The history file, read again at most once a minute.
+    static HISTORY: RefCell<Option<(Instant, Vec<Sample>)>> = const { RefCell::new(None) };
+}
+
+fn with_history<R>(f: impl FnOnce(&[Sample]) -> R) -> R {
+    HISTORY.with(|h| {
+        let mut h = h.borrow_mut();
+        if h.as_ref().is_none_or(|(t, _)| t.elapsed() >= Duration::from_secs(60)) {
+            *h = Some((Instant::now(), history::load()));
+        }
+        f(h.as_ref().map_or(&[], |(_, s)| s))
+    })
+}
+
+/// Graph points for the last GRAPH_DAYS before `now`: the last reading in
+/// each hour. Li-ion (`volts`) plots the voltage, since its percentage
+/// means nothing.
+fn graph_points(samples: &[Sample], now: u64, volts: bool) -> Vec<(f32, f32, bool)> {
+    let span = GRAPH_DAYS * 86400;
+    let start = now.saturating_sub(span);
+    let (lo, hi) = LIION_GRAPH_MV;
+    let mut out: Vec<(f32, f32, bool)> = Vec::new();
+    let mut bucket = None;
+    for s in samples.iter().filter(|s| s.time >= start && s.time <= now) {
+        let y = if volts {
+            let Some(mv) = s.voltage_mv else { continue };
+            ((mv as f32 - lo) / (hi - lo)).clamp(0.0, 1.0)
+        } else {
+            s.percent as f32 / 100.0
+        };
+        let x = (s.time - start) as f32 / span as f32;
+        let b = (x * GRAPH_POINTS) as u32;
+        let p = (x, y, s.charging);
+        match out.last_mut() {
+            Some(last) if bucket == Some(b) => *last = p,
+            _ => out.push(p),
+        }
+        bucket = Some(b);
+    }
+    out
 }
 
 impl View {
     fn from_app(app: &App) -> View {
         let s = &app.state;
         let d = s.device;
+        let (graph, estimate) = if s.battery.is_some() {
+            with_history(|h| {
+                let now = history::now();
+                let e = estimate::estimate(h, now).map(|e| {
+                    let d = estimate::describe(e.remaining_secs);
+                    let mut c = d.chars();
+                    let first = c.next().map(|f| f.to_uppercase().to_string()).unwrap_or_default();
+                    format!("{first}{} left", c.as_str())
+                });
+                (graph_points(h, now, app.liion()), e)
+            })
+        } else {
+            (Vec::new(), None)
+        };
         View {
             loading: app.last_refresh.is_none(),
             connected: s.connected,
@@ -179,6 +251,9 @@ impl View {
             rules: app.config.rules.clone(),
             dpi_popup: app.config.dpi_popup,
             hotkeys: app.config.hotkeys,
+            graph,
+            graph_volts: app.liion(),
+            estimate,
         }
     }
 
@@ -189,6 +264,9 @@ impl View {
         }
         let has_poll = !self.poll_rates.is_empty();
         let mut tabs = vec![Tab::Mouse];
+        if self.battery.is_some() || self.battery_choice.is_some() || self.has_lowbat {
+            tabs.push(Tab::Battery);
+        }
         if has_poll || self.has_idle || !self.scroll_rows().is_empty() {
             tabs.push(Tab::Performance);
         }
@@ -290,8 +368,10 @@ const LINKS: [(&str, &str); 4] = [
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Tab {
-    /// Battery, DPI, mouse details.
+    /// DPI, mouse details.
     Mouse,
+    /// History graph, estimate, battery type, warning level.
+    Battery,
     /// Power mode, polling rate, sleep timer, scroll wheel.
     Performance,
     /// Per-app rules, Power Saver on battery.
@@ -304,6 +384,7 @@ impl Tab {
     fn label(self) -> &'static str {
         match self {
             Tab::Mouse => "Mouse",
+            Tab::Battery => "Battery",
             Tab::Performance => "Performance",
             Tab::Automatic => "Automatic",
             Tab::App => "App",
@@ -736,6 +817,12 @@ impl Gfx {
             radiusY: radius,
         };
         unsafe { self.rt.DrawRoundedRectangle(&rr, &self.brush, width, None) };
+    }
+
+    fn line(&self, a: (f32, f32), b: (f32, f32), width: f32, c: C) {
+        self.color(c);
+        let p = |(x, y): (f32, f32)| Vector2 { X: x, Y: y };
+        unsafe { self.rt.DrawLine(p(a), p(b), &self.brush, width, None) };
     }
 
     fn text(&self, s: &str, r: Rect, f: &IDWriteTextFormat, c: C) {
@@ -1196,6 +1283,15 @@ impl Ui {
         let hover = self.hover;
         match tab {
             Tab::Mouse => {
+                if v.has_stages || v.has_dpi {
+                    y = self.dpi_card(g, t, hits, y) + CARD_GAP;
+                }
+                y = self.about(g, t, hits, y);
+            }
+            Tab::Battery => {
+                if v.battery.is_some() {
+                    y = self.history_card(g, t, y) + CARD_GAP;
+                }
                 // Battery settings (AA mice and those with a warning threshold)
                 if v.battery_choice.is_some() || v.has_lowbat {
                     let rows = v.battery_choice.is_some() as usize * 2 + v.has_lowbat as usize;
@@ -1229,10 +1325,6 @@ impl Ui {
                     }
                     y = card.y + card.h + CARD_GAP;
                 }
-                if v.has_stages || v.has_dpi {
-                    y = self.dpi_card(g, t, hits, y) + CARD_GAP;
-                }
-                y = self.about(g, t, hits, y);
             }
             Tab::Performance => {
                 let has_poll = !v.poll_rates.is_empty();
@@ -1849,6 +1941,69 @@ impl Ui {
     }
 
     /// Device details: firmware, USB ID, connection, support status, serial.
+    /// The last week of battery readings, and how long it should last.
+    fn history_card(&self, g: &Gfx, t: &Theme, y: f32) -> f32 {
+        let v = &self.view;
+        let h = CARD_PAD * 2.0 + 20.0 + 10.0 + GRAPH_H + 18.0;
+        let card = Rect::new(PAD, y, CARD_W, h);
+        self.card_rect(g, t, card);
+        let x = PAD + 16.0;
+        let w = CARD_W - 32.0;
+        let ty = y + CARD_PAD;
+        g.text("Last 7 days", Rect::new(x, ty, w, 20.0), &g.fonts.body, t.text);
+        let note = if v.graph_volts {
+            Some("Voltage".to_string())
+        } else {
+            v.estimate.clone()
+        };
+        if let Some(n) = note {
+            let nw = g.measure(&n, &g.fonts.small);
+            g.text(
+                &n,
+                Rect::new(x + w - nw, ty + 2.0, nw + 2.0, 20.0),
+                &g.fonts.small,
+                t.text2,
+            );
+        }
+
+        // Guides at 0, 50 and 100% (or the Li-ion range), then the line.
+        let gy = ty + 30.0;
+        for f in [0.0, 0.5, 1.0] {
+            let ly = (gy + GRAPH_H * (1.0 - f)).round() + 0.5;
+            g.line((x, ly), (x + w, ly), 1.0, t.card_stroke);
+        }
+        if v.graph.len() < 2 {
+            let msg = "No readings yet. Raisin adds one every 5 minutes while it runs in the tray.";
+            let r = Rect::new(x + 24.0, gy + GRAPH_H / 2.0 - 18.0, w - 48.0, 36.0);
+            g.fill(r.inset(-6.0), 6.0, t.card);
+            g.text(msg, r, &g.fonts.center, t.text3);
+        }
+        let pt = |(px, py, _): (f32, f32, bool)| (x + px * w, gy + GRAPH_H * (1.0 - py));
+        // No line across gaps longer than a few hours (mouse off or asleep).
+        let gap = 4.0 / GRAPH_POINTS;
+        for pair in v.graph.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            if b.0 - a.0 > gap {
+                continue;
+            }
+            let c = if b.2 {
+                t.accent
+            } else if v.graph_volts {
+                level_color(if b.1 > 0.4 { 100 } else { 5 })
+            } else {
+                level_color((b.1 * 100.0).round() as u8)
+            };
+            g.line(pt(a), pt(b), 2.0, c);
+        }
+
+        let ly = gy + GRAPH_H + 4.0;
+        g.text("7 days ago", Rect::new(x, ly, w, 16.0), &g.fonts.small, t.text3);
+        let now = "Now";
+        let nw = g.measure(now, &g.fonts.small);
+        g.text(now, Rect::new(x + w - nw, ly, nw + 2.0, 16.0), &g.fonts.small, t.text3);
+        y + h
+    }
+
     fn about(&self, g: &Gfx, t: &Theme, hits: &mut Vec<(Rect, Hit)>, y: f32) -> f32 {
         let v = &self.view;
         let h = CARD_PAD * 2.0 + 20.0 * 2.0 + 4.0;

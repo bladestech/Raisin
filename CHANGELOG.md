@@ -4,6 +4,16 @@ All notable changes to Raisin are listed here. The format follows [Keep a Change
 
 ## [Unreleased]
 
+### Added
+
+- Battery history: the tray records a reading every 5 minutes to `%APPDATA%\Raisin\battery.csv` (kept for 60 days), and the new Battery tab graphs the last 7 days. With the Li-ion profile the graph shows voltage instead of the percentage.
+- Battery estimate: once there are at least 12 hours and 3% of drain since the last battery change or charge, the Battery tab, the tray tooltip and `raisin info` show roughly how long the battery should last ("about 3 weeks left"). Not shown for the Li-ion profile, whose percentage means nothing.
+- `raisin history`: where the history file is, how many readings it holds, and the estimate.
+
+### Changed
+
+- The settings window has a Battery tab for the graph, battery type and warning level. The Mouse tab keeps DPI and the mouse details, and the window is shorter.
+
 ## [0.2.0] - 2026-11-26
 
 ### Added

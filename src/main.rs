@@ -35,8 +35,9 @@ Raisin: lightweight Razer mouse configurator
   raisin scroll <tactile|freespin>
   raisin accel <on|off>    scroll acceleration
   raisin smartreel <on|off>
+  raisin history           battery history summary and how long it should last
   raisin devices           list supported mice
-  raisin probe             list Razer HID interfaces
+  raisin probe            list Razer HID interfaces
   raisin scan [ids]        read-only dump of class 0x07 get commands";
 
 fn main() {
@@ -135,6 +136,33 @@ fn cli(args: &[String]) -> i32 {
                 }
                 _ => {}
             }
+        }
+        return 0;
+    }
+    if cmd == "history" {
+        // The battery history the tray records; no mouse needed.
+        let samples = history::load();
+        let path = history::path().map(|p| p.display().to_string()).unwrap_or_default();
+        let (Some(first), Some(last)) = (samples.first(), samples.last()) else {
+            println!("no battery history yet ({path})");
+            return 0;
+        };
+        let days = last.time.saturating_sub(first.time) as f64 / 86400.0;
+        println!("file:     {path}");
+        println!("readings: {} over {days:.1} days", samples.len());
+        let volts = last
+            .voltage_mv
+            .map_or(String::new(), |mv| format!(", {:.2} V", mv as f64 / 1000.0));
+        let charging = if last.charging { ", charging" } else { "" };
+        println!("latest:   {}%{volts}{charging} ({})", last.percent, last.cell.key());
+        match estimate::estimate(&samples, history::now()) {
+            Some(e) => println!(
+                "lasts:    {} more ({:.1}% a day)",
+                estimate::describe(e.remaining_secs),
+                e.percent_per_day
+            ),
+            None if last.cell == history::Cell::Liion => println!("lasts:    not estimated for Li-ion cells"),
+            None => println!("lasts:    not enough history yet"),
         }
         return 0;
     }
@@ -398,6 +426,13 @@ fn info(m: &Mouse) -> razer::Result<()> {
         println!("battery:  {}", battery_line(m, &cfg)?);
         if opt(m.battery_type())?.flatten().is_some() {
             println!("type:     {}", battery_type_name(m, &cfg)?);
+        }
+        if let Some(e) = estimate::estimate(&history::load(), history::now()) {
+            println!(
+                "lasts:    {} more ({:.1}% a day)",
+                estimate::describe(e.remaining_secs),
+                e.percent_per_day
+            );
         }
     }
     if let Some((x, y)) = opt(m.dpi())? {
