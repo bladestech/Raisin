@@ -3,8 +3,10 @@
 mod auto;
 mod config;
 mod devices;
+mod estimate;
 mod events;
 mod hid;
+mod history;
 mod power;
 mod razer;
 mod tray;
